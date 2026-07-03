@@ -1,0 +1,19 @@
+[package]
+name = "weave-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+wat.workspace = true
+wasmtime.workspace = true
+wasmparser.workspace = true
+weave-core.workspace = true
+weave-transform.workspace = true
+weave-host.workspace = true
+weave-wasmtime.workspace = true
+
+[[bin]]
+name = "weave"
+path = "src/main.rs"

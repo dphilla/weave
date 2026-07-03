@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/weave-core",
+    "crates/weave-transform",
+    "crates/weave-host",
+    "crates/weave-wasmtime",
+    "crates/weave-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+wasmparser = "0.227"
+wasm-encoder = { version = "0.227", features = ["wasmparser"] }
+wat = "1.227"
+wasmtime = { version = "31", default-features = false, features = ["cranelift", "runtime", "gc", "gc-drc", "threads", "parallel-compilation"] }
+weave-core = { path = "crates/weave-core" }
+weave-transform = { path = "crates/weave-transform" }
+weave-host = { path = "crates/weave-host" }
+weave-wasmtime = { path = "crates/weave-wasmtime" }
+
+[profile.release]
+debug = true

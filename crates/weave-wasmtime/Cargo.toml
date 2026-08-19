@@ -1,0 +1,16 @@
+[package]
+name = "weave-wasmtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+wasmtime.workspace = true
+wasmparser.workspace = true
+weave-core.workspace = true
+weave-host.workspace = true
+weave-transform.workspace = true
+
+[dev-dependencies]
+wat.workspace = true

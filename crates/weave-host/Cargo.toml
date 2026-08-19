@@ -1,0 +1,9 @@
+[package]
+name = "weave-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+weave-core.workspace = true

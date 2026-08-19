@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Weave · Chrome ↔ WAMR</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <p class="eyebrow">Live WebAssembly migration</p>
+        <h1>Chrome <span aria-hidden="true">↔</span> WAMR</h1>
+        <p class="lede">
+          Start a woven workload in this tab or receive one from WAMR, then
+          move it across the runtime boundary without restarting it.
+        </p>
+      </header>
+
+      <section class="path" aria-label="Migration path">
+        <div><span class="dot browser"></span><strong>Chrome</strong><small>WebAssembly API</small></div>
+        <div class="wire"><span>Weave v2</span><i></i></div>
+        <div><span class="dot relay"></span><strong>Relay</strong><small>WebSocket ↔ TCP</small></div>
+        <div class="wire"><span>byte exact</span><i></i></div>
+        <div><span class="dot wamr"></span><strong>WAMR</strong><small>server runtime</small></div>
+      </section>
+
+      <section class="panel connection">
+        <div class="section-heading">
+          <div>
+            <p class="step">Connection</p>
+            <h2>Relay settings</h2>
+          </div>
+          <span id="relay-health" class="badge muted">checking</span>
+        </div>
+        <div class="fields three">
+          <label>
+            Relay URL
+            <input id="relay-url" type="url" autocomplete="url" spellcheck="false">
+          </label>
+          <label>
+            Access token <span class="optional">optional locally</span>
+            <input id="relay-token" type="password" autocomplete="off" spellcheck="false">
+          </label>
+          <label>
+            WAMR target alias
+            <input id="target-name" value="wamr" list="relay-targets" spellcheck="false">
+            <datalist id="relay-targets"></datalist>
+          </label>
+        </div>
+        <p class="hint">WAMR should dial <code id="ingress-address">loading…</code> when this browser is the target.</p>
+      </section>
+
+      <div class="workspace">
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="step">Start here</p>
+              <h2>Run in Chrome</h2>
+            </div>
+            <span id="module-state" class="badge muted">no module</span>
+          </div>
+
+          <div class="module-picker">
+            <label class="file-button">
+              <span>Choose woven .wasm</span>
+              <input id="module-file" type="file" accept=".wasm,application/wasm">
+            </label>
+            <button id="load-demo" class="secondary" type="button">Load generated counter</button>
+          </div>
+          <p id="module-detail" class="hint">Transform a module first; the browser deliberately does no rewriting.</p>
+
+          <div class="fields two">
+            <label>
+              Entry
+              <select id="entry" disabled></select>
+            </label>
+            <label>
+              Arguments <span class="optional">comma or space separated</span>
+              <input id="entry-args" value="250000000" spellcheck="false">
+            </label>
+          </div>
+          <button id="start-browser" class="primary" type="button" disabled>Start workload in Chrome</button>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="step">Move either way</p>
+              <h2>Migration controls</h2>
+            </div>
+            <span id="runtime-state" class="badge idle">idle</span>
+          </div>
+
+          <div class="direction-card">
+            <div>
+              <strong>WAMR → Chrome</strong>
+              <p>Arm this tab, then point WAMR at the relay’s TCP ingress.</p>
+            </div>
+            <button id="arm-target" class="secondary" type="button">Arm browser target</button>
+            <button id="cancel-target" class="ghost" type="button" hidden>Cancel wait</button>
+          </div>
+
+          <div class="direction-card">
+            <div>
+              <strong>Chrome → WAMR</strong>
+              <p>Pre-copy the active browser workload to the named WAMR target.</p>
+            </div>
+            <button id="migrate-browser" class="primary" type="button" disabled>Migrate active workload</button>
+          </div>
+
+          <dl class="metrics">
+            <div><dt>Location</dt><dd id="metric-location">none</dd></div>
+            <div><dt>Polls</dt><dd id="metric-polls">0</dd></div>
+            <div><dt>Pages sent</dt><dd id="metric-pages">0</dd></div>
+          </dl>
+        </section>
+      </div>
+
+      <section class="panel console-panel">
+        <div class="section-heading">
+          <div>
+            <p class="step">Trace</p>
+            <h2>Event log</h2>
+          </div>
+          <button id="clear-log" class="ghost" type="button">Clear</button>
+        </div>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+
+      <footer>
+        This is a development demo. Use TLS, an access token, and explicit
+        origin/target allowlists before placing the relay on a network.
+      </footer>
+    </main>
+    <script type="module" src="/app.mjs"></script>
+  </body>
+</html>

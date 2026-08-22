@@ -129,9 +129,24 @@ func cmdRun(f *flags) error {
 }
 
 type shared struct {
-	mu         sync.Mutex
-	request    string
-	lastResult string
+	mu               sync.Mutex
+	request          *migrationRequest
+	lastResult       string
+	active           bool
+	incomingReserved bool
+}
+
+type migrationRequest struct {
+	target string
+	result chan string
+}
+
+func (s *shared) completeRequestLocked(result string) {
+	s.lastResult = result
+	if s.request != nil {
+		s.request.result <- result
+		s.request = nil
+	}
 }
 
 func cmdServe(f *flags) error {
@@ -148,7 +163,8 @@ func cmdServe(f *flags) error {
 	if v, ok := f.vals["dirty-threshold"]; ok {
 		opts.dirtyThreshold, _ = strconv.Atoi(v)
 	}
-	sh := &shared{}
+	_, startsActive := f.vals["module"]
+	sh := &shared{active: startsActive}
 	moduleCache := map[[32]byte][]byte{}
 	incoming := make(chan net.Conn, 1)
 
@@ -170,19 +186,22 @@ func cmdServe(f *flags) error {
 
 	// driveWorkload runs a workload to done/migrated. Returns "done"|"migrated".
 	driveWorkload := func(inst *Instance, entry string, args []uint64, resume bool) string {
+		defer inst.Close(ctx)
 		var mig *sourceMigration
 		// poll: check for migration requests; drive pre-copy.
 		inst.pollMode = func() int32 {
 			if mig == nil {
 				sh.mu.Lock()
-				target := sh.request
+				target := ""
+				if sh.request != nil {
+					target = sh.request.target
+				}
 				sh.mu.Unlock()
 				if target != "" {
 					m, err := connectSource(target, inst, "wazero", opts)
 					if err != nil {
 						sh.mu.Lock()
-						sh.lastResult = fmt.Sprintf("migration failed to start: %v", err)
-						sh.request = ""
+						sh.completeRequestLocked(fmt.Sprintf("migration failed to start: %v", err))
 						sh.mu.Unlock()
 					} else {
 						mig = m
@@ -192,9 +211,9 @@ func cmdServe(f *flags) error {
 			if mig != nil {
 				ready, err := mig.precopyStep()
 				if err != nil {
+					_ = mig.conn.Close()
 					sh.mu.Lock()
-					sh.lastResult = fmt.Sprintf("migration failed: %v", err)
-					sh.request = ""
+					sh.completeRequestLocked(fmt.Sprintf("migration failed: %v", err))
 					sh.mu.Unlock()
 					mig = nil
 					return 0
@@ -213,9 +232,13 @@ func cmdServe(f *flags) error {
 			unwound, err = inst.CallEntry(ctx, entry, args)
 		}
 		if err != nil {
+			if mig != nil {
+				mig.abort(10, "workload trapped before checkpoint")
+			}
 			fmt.Fprintf(os.Stderr, "weave: workload trapped: %v\n", err)
 			sh.mu.Lock()
-			sh.lastResult = fmt.Sprintf("trap: %v", err)
+			sh.active = false
+			sh.completeRequestLocked(fmt.Sprintf("trap: %v", err))
 			sh.mu.Unlock()
 			return "done"
 		}
@@ -225,33 +248,58 @@ func cmdServe(f *flags) error {
 			} else {
 				stats, err := mig.finish()
 				if err == nil {
-					msg := "migrated: " + stats
+					msg := "migrated: " + stats.String()
+					marker := "WEAVE_MIGRATED"
+					if !stats.commitConfirmed {
+						msg = "commit uncertain: " + stats.String() + "; COMMIT_OK unconfirmed (source retired)"
+						marker = "WEAVE_MIGRATED_UNCONFIRMED"
+						fmt.Fprintf(os.Stderr, "weave: %s\n", stats.commitError)
+					}
 					fmt.Fprintf(os.Stderr, "weave: %s\n", msg)
-					fmt.Println("WEAVE_MIGRATED")
+					fmt.Println(marker)
 					sh.mu.Lock()
-					sh.lastResult = msg
-					sh.request = ""
+					sh.active = false
+					sh.completeRequestLocked(msg)
 					sh.mu.Unlock()
 					return "migrated"
 				}
 				fmt.Fprintf(os.Stderr, "weave: final copy failed (%v), resuming locally\n", err)
 				sh.mu.Lock()
-				sh.lastResult = fmt.Sprintf("migration failed: %v", err)
-				sh.request = ""
+				sh.completeRequestLocked(fmt.Sprintf("migration failed: %v", err))
 				sh.mu.Unlock()
 				mig = nil
 			}
 			unwound, err = inst.Resume(ctx)
 			if err != nil {
+				if mig != nil {
+					mig.abort(10, "workload trapped while resuming")
+				}
 				fmt.Fprintf(os.Stderr, "weave: workload trapped: %v\n", err)
+				sh.mu.Lock()
+				sh.active = false
+				sh.completeRequestLocked(fmt.Sprintf("trap: %v", err))
+				sh.mu.Unlock()
 				return "done"
 			}
 		}
-		res, _ := inst.ReadResults()
+		if mig != nil {
+			mig.abort(10, "workload completed before checkpoint")
+			mig = nil
+		}
+		res, err := inst.ReadResults()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "weave: reading workload results failed: %v\n", err)
+			sh.mu.Lock()
+			sh.active = false
+			sh.completeRequestLocked(fmt.Sprintf("trap: reading results: %v", err))
+			sh.mu.Unlock()
+			return "done"
+		}
 		msg := fmt.Sprintf("done: [%s]", strings.Join(res, ", "))
 		fmt.Printf("WEAVE_DONE [%s]\n", strings.Join(res, ", "))
 		sh.mu.Lock()
-		sh.lastResult = msg
+		sh.active = false
+		sh.completeRequestLocked(msg)
 		sh.mu.Unlock()
 		return "done"
 	}
@@ -273,10 +321,12 @@ func cmdServe(f *flags) error {
 			return err
 		}
 		if err := inst.Init(ctx); err != nil {
+			_ = inst.Close(ctx)
 			return err
 		}
 		args, _, err := entryArgs(inst.meta, f.vals["invoke"], f.args)
 		if err != nil {
+			_ = inst.Close(ctx)
 			return err
 		}
 		fmt.Fprintln(os.Stderr, "weave: starting workload")
@@ -291,11 +341,18 @@ func cmdServe(f *flags) error {
 			// NOTE: __weave_init is NOT called on a restored instance.
 			return NewInstance(ctx, wasm, makeServices(), func(s string) { fmt.Println(s) })
 		}, moduleCache)
-		conn.Close()
 		if err != nil {
+			sh.mu.Lock()
+			sh.incomingReserved = false
+			sh.mu.Unlock()
 			fmt.Fprintf(os.Stderr, "weave: incoming migration failed: %v\n", err)
 			continue
 		}
+		sh.mu.Lock()
+		sh.incomingReserved = false
+		sh.active = true
+		sh.lastResult = ""
+		sh.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "weave: workload received from %s, resuming\n", from)
 		driveWorkload(inst, "", nil, true)
 		maybeExit()
@@ -309,6 +366,7 @@ func classifyConn(conn net.Conn, sh *shared, incoming chan<- net.Conn) {
 	if tc, ok := conn.(*net.TCPConn); ok {
 		tc.SetNoDelay(true)
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(migrationIOTimeout))
 	br := bufio.NewReader(conn)
 	first, err := br.Peek(1)
 	if err != nil {
@@ -316,7 +374,28 @@ func classifyConn(conn net.Conn, sh *shared, incoming chan<- net.Conn) {
 		return
 	}
 	if first[0] == FtHello {
-		incoming <- peekedConn{Conn: conn, r: br}
+		sh.mu.Lock()
+		if sh.active || sh.incomingReserved {
+			sh.mu.Unlock()
+			w := bufio.NewWriter(conn)
+			abortFrame(w, 9, "node busy")
+			_ = w.Flush()
+			_ = conn.Close()
+			return
+		}
+		sh.incomingReserved = true
+		sh.mu.Unlock()
+		select {
+		case incoming <- peekedConn{Conn: conn, r: br}:
+		default:
+			sh.mu.Lock()
+			sh.incomingReserved = false
+			sh.mu.Unlock()
+			w := bufio.NewWriter(conn)
+			abortFrame(w, 9, "node busy")
+			_ = w.Flush()
+			_ = conn.Close()
+		}
 		return
 	}
 	defer conn.Close()
@@ -324,44 +403,66 @@ func classifyConn(conn net.Conn, sh *shared, incoming chan<- net.Conn) {
 	if err != nil {
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	w := bufio.NewWriter(conn)
 	switch f.typ {
 	case FtCtlMigrate:
 		c := &cursor{b: f.payload}
 		target := c.str()
+		if err := c.done(); err != nil {
+			var p wbuf
+			p.str("malformed migrate request")
+			_ = writeFrame(w, FtCtlErr, p.Bytes())
+			_ = w.Flush()
+			return
+		}
+		result := make(chan string, 1)
 		sh.mu.Lock()
-		sh.request = target
-		sh.lastResult = ""
+		rejection := ""
+		if strings.TrimSpace(target) == "" {
+			rejection = "migration target must not be empty"
+		} else if !sh.active {
+			rejection = "node has no active workload"
+		} else if sh.request != nil {
+			rejection = "migration already in progress"
+		} else {
+			sh.request = &migrationRequest{target: target, result: result}
+			sh.lastResult = ""
+		}
 		sh.mu.Unlock()
-		deadline := time.Now().Add(120 * time.Second)
-		for time.Now().Before(deadline) {
-			time.Sleep(25 * time.Millisecond)
-			sh.mu.Lock()
-			res := sh.lastResult
-			sh.mu.Unlock()
-			if res != "" {
-				var p wbuf
-				p.str(res)
-				t := byte(FtCtlErr)
-				if strings.HasPrefix(res, "migrated") || strings.HasPrefix(res, "done") {
-					t = FtCtlOk
-				}
-				writeFrame(w, t, p.Bytes())
-				w.Flush()
-				return
-			}
+		if rejection != "" {
+			var p wbuf
+			p.str(rejection)
+			_ = writeFrame(w, FtCtlErr, p.Bytes())
+			_ = w.Flush()
+			return
+		}
+		res := "timeout waiting for migration result"
+		select {
+		case res = <-result:
+		case <-time.After(120 * time.Second):
 		}
 		var p wbuf
-		p.str("timeout")
-		writeFrame(w, FtCtlErr, p.Bytes())
-		w.Flush()
+		p.str(res)
+		t := byte(FtCtlErr)
+		if strings.HasPrefix(res, "migrated") || strings.HasPrefix(res, "done") {
+			t = FtCtlOk
+		}
+		_ = writeFrame(w, t, p.Bytes())
+		_ = w.Flush()
 	case FtCtlStatus:
 		sh.mu.Lock()
 		res := sh.lastResult
-		sh.mu.Unlock()
 		if res == "" {
-			res = "running"
+			if sh.active {
+				res = "running"
+			} else if sh.incomingReserved {
+				res = "accepting"
+			} else {
+				res = "idle"
+			}
 		}
+		sh.mu.Unlock()
 		var p wbuf
 		p.str(res)
 		writeFrame(w, FtCtlOk, p.Bytes())

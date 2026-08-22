@@ -14,13 +14,15 @@ import (
 	"io"
 	"math"
 	"sort"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 )
 
 const (
-	ProtoVersion = 1
+	ProtoVersion = 2
 	WPage        = 4096
 	WasmPage     = 65536
 
@@ -33,6 +35,10 @@ const (
 	GState = "__weave_state"
 	GFlag  = "__weave_flag"
 	GEntry = "__weave_entry"
+	GCtr   = "__weave_ctr"
+	GSp    = "__weave_sp"
+	GSBase = "__weave_stack_base"
+	GSEnd  = "__weave_stack_end"
 	GRbase = "__weave_rbase"
 )
 
@@ -56,20 +62,102 @@ type Meta struct {
 type cursor struct {
 	b   []byte
 	pos int
+	err error
 }
 
-func (c *cursor) u8() byte     { v := c.b[c.pos]; c.pos++; return v }
-func (c *cursor) u16() uint16  { v := binary.LittleEndian.Uint16(c.b[c.pos:]); c.pos += 2; return v }
-func (c *cursor) u32() uint32  { v := binary.LittleEndian.Uint32(c.b[c.pos:]); c.pos += 4; return v }
-func (c *cursor) u64() uint64  { v := binary.LittleEndian.Uint64(c.b[c.pos:]); c.pos += 8; return v }
-func (c *cursor) str() string  { n := int(c.u32()); s := string(c.b[c.pos : c.pos+n]); c.pos += n; return s }
+func (c *cursor) take(n int) []byte {
+	if c.err != nil {
+		return nil
+	}
+	if n < 0 || c.pos < 0 || n > len(c.b)-c.pos {
+		c.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	v := c.b[c.pos : c.pos+n]
+	c.pos += n
+	return v
+}
+
+func (c *cursor) u8() byte {
+	b := c.take(1)
+	if b == nil {
+		return 0
+	}
+	return b[0]
+}
+
+func (c *cursor) u16() uint16 {
+	b := c.take(2)
+	if b == nil {
+		return 0
+	}
+	return binary.LittleEndian.Uint16(b)
+}
+
+func (c *cursor) u32() uint32 {
+	b := c.take(4)
+	if b == nil {
+		return 0
+	}
+	return binary.LittleEndian.Uint32(b)
+}
+
+func (c *cursor) u64() uint64 {
+	b := c.take(8)
+	if b == nil {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(b)
+}
+
+func (c *cursor) str() string {
+	n := uint64(c.u32())
+	if c.err != nil || n > uint64(len(c.b)-c.pos) {
+		c.err = io.ErrUnexpectedEOF
+		return ""
+	}
+	b := c.take(int(n))
+	if !utf8.Valid(b) {
+		c.err = fmt.Errorf("string is not valid UTF-8")
+		return ""
+	}
+	return string(b)
+}
+
+func (c *cursor) blob() []byte {
+	n := uint64(c.u32())
+	if c.err != nil || n > uint64(len(c.b)-c.pos) {
+		c.err = io.ErrUnexpectedEOF
+		return nil
+	}
+	b := c.take(int(n))
+	return append([]byte(nil), b...)
+}
+
 func (c *cursor) types() []byte {
 	n := int(c.u16())
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = c.u8()
+	b := c.take(n)
+	if b == nil {
+		return nil
+	}
+	out := append([]byte(nil), b...)
+	for _, ty := range out {
+		if ty > 5 {
+			c.err = fmt.Errorf("unknown value type %d", ty)
+			return nil
+		}
 	}
 	return out
+}
+
+func (c *cursor) done() error {
+	if c.err != nil {
+		return c.err
+	}
+	if c.pos != len(c.b) {
+		return fmt.Errorf("%d trailing payload bytes", len(c.b)-c.pos)
+	}
+	return nil
 }
 
 func decodeMeta(payload []byte) (*Meta, error) {
@@ -101,43 +189,288 @@ func decodeMeta(payload []byte) (*Meta, error) {
 	}
 	m.GlobalsAreaSize = c.u32()
 	m.ResultsAreaSize = c.u32()
+	if err := c.done(); err != nil {
+		return nil, fmt.Errorf("invalid weave.meta: %w", err)
+	}
 	return m, nil
+}
+
+func readWasmU32LEB(wasm []byte, pos *int, limit int) (uint32, error) {
+	var result uint32
+	for shift := uint(0); shift < 35; shift += 7 {
+		if *pos >= limit {
+			return 0, io.ErrUnexpectedEOF
+		}
+		b := wasm[*pos]
+		*pos++
+		if shift == 28 && b&0xf0 != 0 {
+			return 0, fmt.Errorf("u32 LEB overflow")
+		}
+		result |= uint32(b&0x7f) << shift
+		if b&0x80 == 0 {
+			return result, nil
+		}
+	}
+	return 0, fmt.Errorf("invalid u32 LEB")
+}
+
+type wasmExport struct {
+	name  string
+	kind  byte
+	index uint32
+}
+
+// inspectWasmStructure reads only the section headers, memory count, and
+// exports needed to validate weave.meta. The module is also compiled by the
+// caller, but keeping this walker bounded avoids relying on runtime-internal
+// APIs for unexported memory definitions.
+func inspectWasmStructure(wasm []byte) (uint32, []wasmExport, error) {
+	if len(wasm) < 8 || binary.LittleEndian.Uint32(wasm) != 0x6d736100 ||
+		binary.LittleEndian.Uint32(wasm[4:]) != 1 {
+		return 0, nil, fmt.Errorf("not a wasm module")
+	}
+	var definedMemories uint32
+	var exports []wasmExport
+	pos := 8
+	for pos < len(wasm) {
+		id := wasm[pos]
+		pos++
+		size, err := readWasmU32LEB(wasm, &pos, len(wasm))
+		if err != nil || uint64(size) > uint64(len(wasm)-pos) {
+			return 0, nil, fmt.Errorf("malformed wasm section")
+		}
+		end := pos + int(size)
+		switch id {
+		case 5: // memory section: vec(memorytype), count is the first field
+			count, err := readWasmU32LEB(wasm, &pos, end)
+			if err != nil {
+				return 0, nil, fmt.Errorf("malformed memory section: %w", err)
+			}
+			definedMemories = count
+		case 7: // export section: vec(name, kind, index)
+			count, err := readWasmU32LEB(wasm, &pos, end)
+			if err != nil {
+				return 0, nil, fmt.Errorf("malformed export section: %w", err)
+			}
+			for i := uint32(0); i < count; i++ {
+				nameLen, err := readWasmU32LEB(wasm, &pos, end)
+				if err != nil || uint64(nameLen) > uint64(end-pos) {
+					return 0, nil, fmt.Errorf("malformed export name")
+				}
+				name := string(wasm[pos : pos+int(nameLen)])
+				pos += int(nameLen)
+				if pos >= end {
+					return 0, nil, fmt.Errorf("malformed export descriptor")
+				}
+				kind := wasm[pos]
+				pos++
+				index, err := readWasmU32LEB(wasm, &pos, end)
+				if err != nil {
+					return 0, nil, fmt.Errorf("malformed export index: %w", err)
+				}
+				exports = append(exports, wasmExport{name: name, kind: kind, index: index})
+			}
+			if pos != end {
+				return 0, nil, fmt.Errorf("trailing bytes in export section")
+			}
+		case 8:
+			return 0, nil, fmt.Errorf("woven migration module must not contain a start section")
+		}
+		pos = end
+	}
+	return definedMemories, exports, nil
+}
+
+func metaValueType(code byte) (api.ValueType, error) {
+	switch code {
+	case 0:
+		return api.ValueTypeI32, nil
+	case 1:
+		return api.ValueTypeI64, nil
+	case 2:
+		return api.ValueTypeF32, nil
+	case 3:
+		return api.ValueTypeF64, nil
+	case 4:
+		return api.ValueType(0x7b), nil // v128 (not exported by wazero/api)
+	case 5:
+		return api.ValueType(0x70), nil // funcref (not exported by wazero/api)
+	default:
+		return 0, fmt.Errorf("unknown metadata value type %d", code)
+	}
+}
+
+func validateValueTypes(label string, actual []api.ValueType, expected []byte) error {
+	if len(actual) != len(expected) {
+		return fmt.Errorf("%s has %d values, metadata declares %d", label, len(actual), len(expected))
+	}
+	for i, code := range expected {
+		want, err := metaValueType(code)
+		if err != nil {
+			return err
+		}
+		if actual[i] != want {
+			return fmt.Errorf("%s value %d has type %#x, metadata declares %#x", label, i, actual[i], want)
+		}
+	}
+	return nil
+}
+
+func validateFunctionExport(definitions map[string]api.FunctionDefinition, name string, params, results []byte) error {
+	definition, ok := definitions[name]
+	if !ok {
+		return fmt.Errorf("module has no exported function %s", name)
+	}
+	if err := validateValueTypes("function "+name+" parameters", definition.ParamTypes(), params); err != nil {
+		return err
+	}
+	return validateValueTypes("function "+name+" results", definition.ResultTypes(), results)
+}
+
+func validateMemoryContract(compiled wazero.CompiledModule, wasm []byte, meta *Meta) (uint64, error) {
+	definedMemories, _, err := inspectWasmStructure(wasm)
+	if err != nil {
+		return 0, err
+	}
+	totalMemories := uint64(len(compiled.ImportedMemories())) + uint64(definedMemories)
+	if totalMemories != uint64(len(meta.Memories)) {
+		return 0, fmt.Errorf("metadata names %d memories, module defines or imports %d", len(meta.Memories), totalMemories)
+	}
+
+	memoryDefinitions := compiled.ExportedMemories()
+	seenMemories := make(map[string]struct{}, len(meta.Memories))
+	var initialMemoryBytes uint64
+	for index, name := range meta.Memories {
+		if _, duplicate := seenMemories[name]; duplicate {
+			return 0, fmt.Errorf("metadata contains duplicate memory export %q", name)
+		}
+		seenMemories[name] = struct{}{}
+		memory, ok := memoryDefinitions[name]
+		if !ok {
+			return 0, fmt.Errorf("metadata memory export %q is absent from module", name)
+		}
+		if memory.Index() != uint32(index) {
+			return 0, fmt.Errorf("metadata memory %q maps to index %d, expected %d", name, memory.Index(), index)
+		}
+		bytes := uint64(memory.Min()) * WasmPage
+		if initialMemoryBytes > ^uint64(0)-bytes {
+			return 0, fmt.Errorf("aggregate declared initial memory overflows u64")
+		}
+		initialMemoryBytes += bytes
+	}
+
+	return initialMemoryBytes, nil
+}
+
+// validateCompiledABI proves that untrusted weave.meta describes the actual
+// module ABI used by migration. It returns aggregate declared initial memory.
+func validateCompiledABI(compiled wazero.CompiledModule, wasm []byte, meta *Meta) (uint64, error) {
+	initialMemoryBytes, err := validateMemoryContract(compiled, wasm, meta)
+	if err != nil {
+		return 0, err
+	}
+	_, exports, err := inspectWasmStructure(wasm)
+	if err != nil {
+		return 0, err
+	}
+
+	functions := compiled.ExportedFunctions()
+	if err := validateFunctionExport(functions, "__weave_init", nil, nil); err != nil {
+		return 0, err
+	}
+	if err := validateFunctionExport(functions, "__weave_resume", nil, nil); err != nil {
+		return 0, err
+	}
+	seenEntries := make(map[string]struct{}, len(meta.Entries))
+	for _, entry := range meta.Entries {
+		if _, duplicate := seenEntries[entry.Name]; duplicate {
+			return 0, fmt.Errorf("metadata contains duplicate entry %q", entry.Name)
+		}
+		seenEntries[entry.Name] = struct{}{}
+		if err := validateFunctionExport(functions, entry.Name, entry.Params, entry.Results); err != nil {
+			return 0, err
+		}
+	}
+
+	var controlExports []string
+	for _, export := range exports {
+		if export.kind == api.ExternTypeGlobal && strings.HasPrefix(export.name, "__weave") {
+			controlExports = append(controlExports, export.name)
+		}
+	}
+	if len(controlExports) != len(meta.ControlGlobals) {
+		return 0, fmt.Errorf("metadata names %d control globals, module exports %d", len(meta.ControlGlobals), len(controlExports))
+	}
+	for i := range controlExports {
+		if controlExports[i] != meta.ControlGlobals[i] {
+			return 0, fmt.Errorf("metadata control global %d is %q, module exports %q", i, meta.ControlGlobals[i], controlExports[i])
+		}
+	}
+	requiredControls := []string{GState, GFlag, GEntry, GCtr, GSp, GSBase, GSEnd, GRbase}
+	if len(meta.ControlGlobals) < len(requiredControls) {
+		return 0, fmt.Errorf("metadata omits fixed Weave control globals")
+	}
+	for i, name := range requiredControls {
+		if meta.ControlGlobals[i] != name {
+			return 0, fmt.Errorf("metadata control global %d is %q, expected %q", i, meta.ControlGlobals[i], name)
+		}
+	}
+	suffix := meta.ControlGlobals[len(requiredControls):]
+	if len(suffix)%2 != 0 {
+		return 0, fmt.Errorf("metadata table-shadow control globals are incomplete")
+	}
+	tableShadows := len(suffix) / 2
+	for i := 0; i < tableShadows; i++ {
+		if want := fmt.Sprintf("__weave_tsh%d", i); suffix[i] != want {
+			return 0, fmt.Errorf("metadata table-shadow global %d is %q, expected %q", i, suffix[i], want)
+		}
+		if want := fmt.Sprintf("__weave_tshcap%d", i); suffix[tableShadows+i] != want {
+			return 0, fmt.Errorf("metadata table-shadow capacity global %d is %q, expected %q", i, suffix[tableShadows+i], want)
+		}
+	}
+	if meta.GlobalsAreaSize%16 != 0 {
+		return 0, fmt.Errorf("metadata globals area size %d is not 16-byte aligned", meta.GlobalsAreaSize)
+	}
+	maxResults := 0
+	for _, entry := range meta.Entries {
+		if len(entry.Results) > maxResults {
+			maxResults = len(entry.Results)
+		}
+	}
+	wantResultsArea := uint64(maxResults) * 16
+	if uint64(meta.ResultsAreaSize) != wantResultsArea {
+		return 0, fmt.Errorf("metadata results area size is %d, expected %d", meta.ResultsAreaSize, wantResultsArea)
+	}
+	return initialMemoryBytes, nil
 }
 
 // extractMeta walks the wasm binary's custom sections for weave.meta.
 func extractMeta(wasm []byte) (*Meta, []byte, error) {
-	if len(wasm) < 8 || binary.LittleEndian.Uint32(wasm) != 0x6d736100 {
+	if len(wasm) < 8 || binary.LittleEndian.Uint32(wasm) != 0x6d736100 ||
+		binary.LittleEndian.Uint32(wasm[4:]) != 1 {
 		return nil, nil, fmt.Errorf("not a wasm module")
 	}
 	pos := 8
-	leb := func() int {
-		r, s := 0, 0
-		for {
-			b := wasm[pos]
-			pos++
-			r |= int(b&0x7f) << s
-			if b&0x80 == 0 {
-				return r
-			}
-			s += 7
-		}
-	}
 	for pos < len(wasm) {
 		id := wasm[pos]
 		pos++
-		size := leb()
-		end := pos + size
+		size, err := readWasmU32LEB(wasm, &pos, len(wasm))
+		if err != nil || uint64(size) > uint64(len(wasm)-pos) {
+			return nil, nil, fmt.Errorf("malformed wasm section")
+		}
+		end := pos + int(size)
 		if id == 0 {
-			save := pos
-			nameLen := leb()
-			name := string(wasm[pos : pos+nameLen])
-			pos += nameLen
+			nameLen, err := readWasmU32LEB(wasm, &pos, end)
+			if err != nil || uint64(nameLen) > uint64(end-pos) {
+				return nil, nil, fmt.Errorf("malformed custom section name")
+			}
+			name := string(wasm[pos : pos+int(nameLen)])
+			pos += int(nameLen)
 			if name == "weave.meta" {
-				payload := wasm[pos:end]
+				payload := append([]byte(nil), wasm[pos:end]...)
 				m, err := decodeMeta(payload)
 				return m, payload, err
 			}
-			pos = save
 		}
 		pos = end
 	}
@@ -161,12 +494,14 @@ const (
 	FtGlobals    = 12
 	FtServices   = 13
 	FtFinalEnd   = 14
-	FtResumeOk   = 15
+	FtPrepared   = 15
 	FtAbort      = 16
 	FtCtlMigrate = 17
 	FtCtlStatus  = 18
 	FtCtlOk      = 19
 	FtCtlErr     = 20
+	FtCommit     = 21
+	FtCommitOk   = 22
 )
 
 type frame struct {
@@ -175,6 +510,9 @@ type frame struct {
 }
 
 func writeFrame(w *bufio.Writer, typ byte, payload []byte) error {
+	if len(payload) > 64<<20 {
+		return fmt.Errorf("frame payload too large: %d", len(payload))
+	}
 	var hdr [5]byte
 	hdr[0] = typ
 	binary.LittleEndian.PutUint32(hdr[1:], uint32(len(payload)))
@@ -203,12 +541,12 @@ func readFrameR(r *bufio.Reader) (frame, error) {
 
 type wbuf struct{ bytes.Buffer }
 
-func (w *wbuf) u8(v byte)      { w.WriteByte(v) }
-func (w *wbuf) u16(v uint16)   { var b [2]byte; binary.LittleEndian.PutUint16(b[:], v); w.Write(b[:]) }
-func (w *wbuf) u32(v uint32)   { var b [4]byte; binary.LittleEndian.PutUint32(b[:], v); w.Write(b[:]) }
-func (w *wbuf) u64(v uint64)   { var b [8]byte; binary.LittleEndian.PutUint64(b[:], v); w.Write(b[:]) }
-func (w *wbuf) str(s string)   { w.u32(uint32(len(s))); w.WriteString(s) }
-func (w *wbuf) blob(b []byte)  { w.u32(uint32(len(b))); w.Write(b) }
+func (w *wbuf) u8(v byte)     { w.WriteByte(v) }
+func (w *wbuf) u16(v uint16)  { var b [2]byte; binary.LittleEndian.PutUint16(b[:], v); w.Write(b[:]) }
+func (w *wbuf) u32(v uint32)  { var b [4]byte; binary.LittleEndian.PutUint32(b[:], v); w.Write(b[:]) }
+func (w *wbuf) u64(v uint64)  { var b [8]byte; binary.LittleEndian.PutUint64(b[:], v); w.Write(b[:]) }
+func (w *wbuf) str(s string)  { w.u32(uint32(len(s))); w.WriteString(s) }
+func (w *wbuf) blob(b []byte) { w.u32(uint32(len(b))); w.Write(b) }
 
 func abortFrame(w *bufio.Writer, code uint32, msg string) {
 	var p wbuf
@@ -230,8 +568,9 @@ func peerAbort(f frame) error {
 
 // ------------------------------------------------------------------ services
 
-// Service carries migratable host-function state. env.emit* match the Rust
-// and JS runners byte-for-byte.
+// Service carries migratable host-function state. Restore stages a fresh
+// target before COMMIT and must not publish externally visible effects.
+// env.emit* match the Rust and JS runners byte-for-byte.
 type Service interface {
 	Name() string
 	Snapshot() []byte
@@ -279,6 +618,24 @@ func snapshotServices(svcs []Service) [][2]interface{} {
 	return out
 }
 
+func validateServices(services []Service) error {
+	seen := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		if service == nil {
+			return fmt.Errorf("nil host service")
+		}
+		name := service.Name()
+		if !utf8.ValidString(name) {
+			return fmt.Errorf("host-service name is not valid UTF-8")
+		}
+		if _, exists := seen[name]; exists {
+			return fmt.Errorf("duplicate host-service name %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	return nil
+}
+
 // ------------------------------------------------------------------ instance
 
 type Instance struct {
@@ -298,7 +655,19 @@ type Poll struct {
 	inst *Instance
 }
 
+func (in *Instance) Close(ctx context.Context) error {
+	if in.runtime == nil {
+		return nil
+	}
+	err := in.runtime.Close(ctx)
+	in.runtime = nil
+	return err
+}
+
 func NewInstance(ctx context.Context, wasm []byte, services []Service, emitLog func(string)) (*Instance, error) {
+	if err := validateServices(services); err != nil {
+		return nil, err
+	}
 	meta, metaRaw, err := extractMeta(wasm)
 	if err != nil {
 		return nil, err
@@ -314,6 +683,21 @@ func NewInstance(ctx context.Context, wasm []byte, services []Service, emitLog f
 
 	rt := wazero.NewRuntime(ctx)
 	inst.runtime = rt
+	completed := false
+	defer func() {
+		if !completed {
+			_ = rt.Close(ctx)
+		}
+	}()
+
+	compiled, err := rt.CompileModule(ctx, wasm)
+	if err != nil {
+		return nil, fmt.Errorf("compiling module: %w", err)
+	}
+	defer compiled.Close(ctx)
+	if _, err := validateCompiledABI(compiled, wasm, meta); err != nil {
+		return nil, fmt.Errorf("validating module ABI: %w", err)
+	}
 
 	_, err = rt.NewHostModuleBuilder("weave").
 		NewFunctionBuilder().
@@ -367,12 +751,37 @@ func NewInstance(ctx context.Context, wasm []byte, services []Service, emitLog f
 		return nil, fmt.Errorf("registering env services: %w", err)
 	}
 
-	mod, err := rt.Instantiate(ctx, wasm)
+	mod, err := rt.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
 	if err != nil {
 		return nil, fmt.Errorf("instantiating module: %w", err)
 	}
 	inst.module = mod
+	if err := inst.validateRuntimeABI(); err != nil {
+		return nil, err
+	}
+	completed = true
 	return inst, nil
+}
+
+func (in *Instance) validateRuntimeABI() error {
+	seen := make(map[string]struct{}, len(in.meta.ControlGlobals))
+	for _, name := range in.meta.ControlGlobals {
+		if _, duplicate := seen[name]; duplicate {
+			return fmt.Errorf("metadata contains duplicate control global %q", name)
+		}
+		seen[name] = struct{}{}
+		global := in.module.ExportedGlobal(name)
+		if global == nil {
+			return fmt.Errorf("module has no exported control global %s", name)
+		}
+		if global.Type() != api.ValueTypeI32 {
+			return fmt.Errorf("control global %s is not i32", name)
+		}
+		if _, mutable := global.(api.MutableGlobal); !mutable {
+			return fmt.Errorf("control global %s is not mutable", name)
+		}
+	}
+	return nil
 }
 
 func (in *Instance) global(name string) int32 {
@@ -405,7 +814,11 @@ func (in *Instance) mem(i int) api.Memory {
 }
 
 func (in *Instance) Init(ctx context.Context) error {
-	_, err := in.module.ExportedFunction("__weave_init").Call(ctx)
+	function := in.module.ExportedFunction("__weave_init")
+	if function == nil {
+		return fmt.Errorf("module has no __weave_init export")
+	}
+	_, err := function.Call(ctx)
 	return err
 }
 
@@ -422,7 +835,11 @@ func (in *Instance) CallEntry(ctx context.Context, entry string, args []uint64) 
 }
 
 func (in *Instance) Resume(ctx context.Context) (bool, error) {
-	if _, err := in.module.ExportedFunction("__weave_resume").Call(ctx); err != nil {
+	function := in.module.ExportedFunction("__weave_resume")
+	if function == nil {
+		return false, fmt.Errorf("module has no __weave_resume export")
+	}
+	if _, err := function.Call(ctx); err != nil {
 		return false, err
 	}
 	return in.global(GFlag) == FlagUnwound, nil
@@ -431,16 +848,22 @@ func (in *Instance) Resume(ctx context.Context) (bool, error) {
 // ReadResults reads the completed entry's results from the results area.
 func (in *Instance) ReadResults() ([]string, error) {
 	idx := int(in.global(GEntry))
-	if idx >= len(in.meta.Entries) {
+	if idx < 0 || idx >= len(in.meta.Entries) {
 		return nil, fmt.Errorf("bad entry index")
 	}
 	e := in.meta.Entries[idx]
-	rbase := uint32(in.global(GRbase))
-	base := rbase + in.meta.GlobalsAreaSize
+	rbase := uint64(uint32(in.global(GRbase)))
+	base := rbase + uint64(in.meta.GlobalsAreaSize)
+	if base > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("results area offset overflow")
+	}
 	var out []string
 	for i, ty := range e.Results {
-		off := base + uint32(i)*16
-		b, ok := in.mem(0).Read(off, 16)
+		off := base + uint64(i)*16
+		if off > uint64(^uint32(0)) {
+			return nil, fmt.Errorf("results area offset overflow")
+		}
+		b, ok := in.mem(0).Read(uint32(off), 16)
 		if !ok {
 			return nil, fmt.Errorf("results area out of bounds")
 		}

@@ -1,0 +1,19 @@
+[package]
+name = "weave-wamr"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+build = "build.rs"
+
+[dependencies]
+anyhow = "1"
+wasmparser = "0.227"
+weave-core = { path = "../crates/weave-core" }
+weave-host = { path = "../crates/weave-host" }
+
+[dev-dependencies]
+wasm-encoder = "0.227"
+
+# Keep the adapter independently buildable without changing the root workspace.
+[workspace]

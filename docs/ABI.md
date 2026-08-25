@@ -22,6 +22,10 @@ The module's own imports (host services) are listed in `weave.meta` →
 | memories | memory | Every memory is exported (existing export name reused, else `__weave_memN`); names listed in `weave.meta.memories`. |
 | control globals | global (mut i32) | Listed in `weave.meta.control_globals`; the complete non-memory state. |
 
+A woven module must not retain a core Wasm start section. Transformation folds
+the original start into `__weave_init`; every receiving adapter validates this
+before instantiation so a staged target cannot execute before protocol COMMIT.
+
 ## Control globals
 
 | name | meaning |
@@ -39,8 +43,11 @@ The module's own imports (host services) are listed in `weave.meta` →
 When a workload completes (on either side of a migration), each result `i` of
 the entry is staged at `mem0[__weave_rbase + globals_area_size + 16*i]`,
 little-endian, 16 bytes per slot. Types come from `weave.meta.entries`.
-This is how a result outlives a migration and how JS hosts read i64/v128
-results without Global API limitations.
+This is how a result outlives a migration. JS hosts read scalar results and a
+resumed workload's `v128` result from this area without relying on the Global
+API. JavaScript still cannot directly call a public Wasm entry with a `v128`
+parameter or result, so starting such an entry in Chrome requires a scalar
+guest wrapper.
 
 ## Snapshot / restore recipe (what every plugin does)
 
@@ -50,10 +57,12 @@ Capture (after `__weave_flag == 1`):
 3. collect service blobs.
 
 Restore (fresh instance, **without** `__weave_init`):
-1. grow memories to captured sizes, write bytes;
-2. set every control global;
-3. restore service blobs;
-4. call `__weave_resume`.
+1. clear every instantiated memory to zero (active data segments otherwise
+   violate sparse zero-page elision);
+2. grow memories to captured sizes, write bytes;
+3. set every control global;
+4. restore the exact service set;
+5. call `__weave_resume`.
 
 ## `weave.meta` custom section
 
@@ -89,5 +98,7 @@ byte-compatible. Built-ins (implemented identically in Rust/JS/Go runners):
 - Single-threaded guest; one entry call in flight at a time.
 - Hosts must not request an unwind from a reentrant host→guest call.
 - Don't call entries while an unwound checkpoint is pending (resume it first).
+- Source and target must install the same unique service names (sorted
+  lexicographically by their UTF-8 bytes) and byte-compatible blob formats.
 - The countdown means checkpoint latency is bounded by `poll_period` site
   executions on any unbounded execution path.

@@ -136,6 +136,9 @@ impl Meta {
         }
         let globals_area_size = get_u32(buf, &mut pos)?;
         let results_area_size = get_u32(buf, &mut pos)?;
+        if pos != buf.len() {
+            bail!("weave.meta: trailing bytes");
+        }
         Ok(Meta {
             version,
             poll_period,

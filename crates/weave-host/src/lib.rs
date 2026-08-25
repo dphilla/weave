@@ -29,6 +29,9 @@ pub trait HostService: Send {
     /// Serialize the complete current state.
     fn snapshot(&self) -> Vec<u8>;
     /// Replace state from a snapshot produced by `snapshot()` on the peer.
+    /// This runs while a fresh target is staged before protocol COMMIT and
+    /// must not publish externally visible effects. External ownership needs
+    /// an application-level fence activated only after the handoff commits.
     fn restore(&mut self, blob: &[u8]) -> Result<()>;
 }
 
@@ -41,8 +44,9 @@ pub trait MemRead {
     fn read(&self, mem: usize, off: usize, buf: &mut [u8]);
 }
 
-/// Snapshot every registered service, sorted by name (deterministic order is
-/// required for the state hash to agree across peers).
+/// Snapshot every registered service, sorted lexicographically by UTF-8 name
+/// bytes (deterministic order is required for the state hash to agree across
+/// peers).
 pub fn snapshot_services_ref(services: &[Box<dyn HostService>]) -> Vec<(String, Vec<u8>)> {
     let mut v: Vec<(String, Vec<u8>)> = services
         .iter()

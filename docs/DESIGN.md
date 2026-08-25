@@ -1,9 +1,9 @@
 # Weave — Design
 
 This document explains *why* Weave is built the way it is: how you can move a
-running Wasm workload between arbitrary spec-compliant runtimes when none of
-them exposes its execution stack, and where the semantic boundaries of that
-capability lie.
+running portable Wasm workload between runtime adapters when none of their
+engines exposes its execution stack, and where the semantic boundaries of
+that capability lie.
 
 Prior art shaped the constraints but not the mechanism. CRIU freezes Linux
 processes via kernel APIs; vMotion iteratively pre-copies VM memory with
@@ -84,8 +84,9 @@ stack in linear memory and returns a dummy value; each caller's check does the
 same. The entry wrapper observes the unwind, saves all mutable application
 globals into the weave region (via generated `$globals_save` — required
 because JS hosts cannot read v128 or funcref globals through the API), records
-which entry was live, and sets `__weave_flag = UNWOUND`. Total cost:
-microseconds.
+which entry was live, and sets `__weave_flag = UNWOUND`. The unwind cost
+scales with live call depth and saved state; it is microseconds in the test
+fixtures, and is only one component of total handoff downtime.
 
 **Rewind:** the host calls `__weave_resume`. It reloads application globals,
 rehydrates funcref tables, sets state to REWINDING and re-enters the recorded
@@ -108,10 +109,11 @@ indices in linear memory. Therefore:
 > **snapshot = memory contents + a fixed list of exported mutable i32 control
 > globals + one opaque blob per host service.**
 
-The host-side ABI never exceeds: read/write exported memory, get/set exported
-i32 globals, call exports. This is the least-common-denominator every runtime
-supports, which is precisely why the wasmtime plugin is ~600 lines and the JS
-and Go plugins are straightforward ports.
+The host-side guest ABI never exceeds: read/write exported memory, get/set
+exported i32 globals, and call exports. A runtime also has to supply the
+module's declared imports and transport. This small surface is why the same
+state model works in wasmtime, V8/Chrome, wazero, and WAMR without engine
+stack APIs.
 
 ### 1.5 Funcrefs, tables, segments
 
@@ -135,8 +137,8 @@ initialization side effects don't replay on restore.
 
 ### 1.6 Support matrix, with reasons
 
-Supported: full core Wasm 2.0 (MVP, multi-value, sign-ext, sat-trunc, bulk
-memory, funcref reference types, SIMD/v128), multiple memories, tail calls
+Supported core-Wasm proposals: MVP, multi-value, sign-ext, sat-trunc, bulk
+memory, funcref reference types, SIMD/v128, multiple memories, and tail calls
 (lowered). Rejected with diagnostics:
 
 - **Shared memories / threads.** A consistent checkpoint of concurrently
@@ -152,42 +154,54 @@ memory, funcref reference types, SIMD/v128), multiple memories, tail calls
   signature (shadow parameters) including indirect-call types; LLVM/Go/Rust
   toolchains never emit it (function pointers are table indices). Rejected
   rather than half-supported.
-- **exceptions / GC / memory64**: out of scope for v1; each is a bounded,
-  known extension of the same machinery.
+- **exceptions / GC / memory64**: out of scope for the current guest ABI; each
+  is a bounded, known extension of the same machinery.
 
 ## 2. The protocol (amortization)
 
 See `docs/PROTOCOL.md` for the frame grammar. The design goals: peer-to-peer
 (source dials target directly), streaming (the target applies pages into a
-live instance as they arrive), and amortized (the workload keeps running
-through the bulk of the transfer).
+live instance as they arrive), and amortized (after module synchronization,
+the workload keeps running through the bulk of the memory transfer).
 
 - **Iterative pre-copy.** Dirty tracking is content-based (truncated SHA-256
   per 4 KiB page) because Wasm gives no write-protection or dirty bits; a
   cryptographic digest is mandatory since a missed dirty page is silent
-  corruption. All-zero pages are elided (fresh target memory is already
-  zero). Each `poll` scans/sends a bounded byte budget, so the guest's pause
-  per poll is bounded; rounds repeat until a round re-sends ≤ threshold pages
-  (or a round cap).
+  corruption. All-zero pages are elided. Because instantiation applies active
+  data segments, every restore target explicitly clears all memories before
+  it accepts sparse pages; “fresh instance” alone is not a zero baseline.
+  Each `poll` scans/sends a bounded byte budget, so the guest's pause per poll
+  is bounded; rounds repeat until a round re-sends ≤ threshold pages (or a
+  round cap).
 - **Stop-and-copy.** The unwind puts the live stack *into memory*; the final
   round therefore automatically carries the call stack, saved globals and
-  service state as ordinary page deltas plus two small frames. Measured pause
-  deltas in the test matrix: 0–2 pages.
+  service state as ordinary page deltas plus two small frames. Measured final
+  deltas in the test matrix are 0–2 pages. Total downtime also includes
+  streaming that delta, hashing the complete staged state, and commit; a
+  high-dirty workload can therefore have a materially longer pause while
+  still using bounded host memory.
 - **Verification.** The target recomputes SHA-256 over the complete final
   state (all memories + control globals + service blobs) and must match the
   source's `FINAL_END` hash before it acknowledges. Three independent
   implementations (Rust, JS, Go) of the hash stream agree byte-for-byte —
   this is checked implicitly by every cross-runtime migration.
-- **Failure = rollback.** Until `RESUME_OK`, the source still holds a complete
-  checkpoint (its own unwound instance). Any error → local `__weave_resume` →
-  the workload continues on the source as if the migration never happened
-  (covered by an explicit kill-the-target-mid-stream test).
+- **Prepare/commit ownership.** Until `PREPARED`, the source still holds a
+  complete checkpoint and any error rewinds locally (covered by an explicit
+  kill-the-target-mid-stream test). `PREPARED` is the irreversible boundary:
+  the source sends `COMMIT` and retires even if `COMMIT_OK` is lost, while the
+  target cannot execute before receiving `COMMIT`. This prevents split-brain
+  execution; an ambiguous commit may sacrifice availability instead.
 
 Single-threaded hosts (JS) cannot do socket work while the guest runs, so the
 JS plugin uses *unwind-yield*: poll requests an unwind on a time slice, the
 host does its async round, then immediately rewinds. Same guest ABI, same
 protocol, different host scheduling — which is the point of putting the
 machinery in the guest.
+
+Chrome has no raw TCP API. `js/weave-browser.mjs` adapts binary WebSocket
+messages to the same bounded byte-stream interface, and the demo relay bridges
+them to native TCP in both directions. See
+[`BROWSER_WAMR.md`](BROWSER_WAMR.md) for the exact portable workload contract.
 
 ## 3. Host services
 
@@ -198,11 +212,18 @@ requires stateful host interfaces to implement:
 name() -> stable identifier        snapshot() -> bytes        restore(bytes)
 ```
 
-Blobs ride in the snapshot/protocol (sorted by name, hashed with everything
-else). Both peers must register the same service set; the target validates the
-module's imports against it before accepting. The built-in `env.emit*`
-services triple as: progress reporting, a cross-runtime determinism check, and
-byte-compatibility reference implementations in all three host languages.
+Blobs ride in the snapshot/protocol (sorted lexicographically by UTF-8 name
+bytes and hashed with everything else). Both peers must register the exact
+same service set; the target rejects
+missing, extra, duplicate, or reordered blobs and runs restore hooks only after
+the final state hash matches. The built-in `env.emit*` services triple as:
+progress reporting, a cross-runtime determinism check, and byte-compatibility
+reference implementations across the bundled hosts.
+
+Restore is a staging operation on fresh, non-executing target service objects.
+It must not publish externally visible effects. Services representing leases,
+sockets, or other external ownership need an application-specific fence that
+is published only after protocol COMMIT.
 
 ## 4. What "production grade" means here
 
@@ -213,5 +234,8 @@ byte-compatibility reference implementations in all three host languages.
   the uninterrupted run exactly (results *and* full host-visible event
   sequence) — enforced across processes, runtimes, and chains of migrations.
 - End-to-end integrity hashes gate every resume.
-- Failure paths are first-class: abort/rollback is tested, and a node that
-  fails to migrate keeps running its workload.
+- Protocol phases, module metadata, page ranges, round counts, memory quotas,
+  ordered control globals, and exact service contracts are checked before a
+  target acknowledges a migration.
+- Failure paths are first-class: pre-commit abort/rollback and lost
+  post-commit confirmation are tested, with at-most-one executor preserved.

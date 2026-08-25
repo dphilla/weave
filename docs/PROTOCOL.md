@@ -1,8 +1,10 @@
-# Weave wire protocol (v1)
+# Weave wire protocol (v2)
 
-Peer-to-peer, single TCP connection dialed by the **source** directly to the
-**target** node's listen address. The same framing carries the tiny control
-API used by `weave migrate/status`.
+A migration uses one ordered byte stream dialed by the **source** toward the
+**target**. Native nodes use TCP directly. Chrome carries the identical bytes
+inside binary WebSocket messages through the demo's WebSocket↔TCP relay. The
+same framing carries the tiny native control API used by
+`weave migrate/status`.
 
 Framing: `[type: u8][len: u32 LE][payload: len bytes]`. Strings are
 `u32 LE length + UTF-8`. Max frame 64 MiB.
@@ -23,18 +25,25 @@ Framing: `[type: u8][len: u32 LE][payload: len bytes]`. Strings are
 | 12 | GLOBALS | u16 count × { name str, value u32 } | src→dst |
 | 13 | SERVICES | u16 count × { name str, blob u32-prefixed } | src→dst |
 | 14 | FINAL_END | state_sha256 [32] | src→dst |
-| 15 | RESUME_OK | — (hash verified; source may retire its instance) | dst→src |
+| 15 | PREPARED | — (state verified/restored; target is not executing) | dst→src |
 | 16 | ABORT | code u32, msg str | both |
 | 17 | CTL_MIGRATE | target addr str | ctl→node |
 | 18 | CTL_STATUS | — | ctl→node |
 | 19 | CTL_OK | msg str | node→ctl |
 | 20 | CTL_ERR | msg str | node→ctl |
+| 21 | COMMIT | — (irreversible ownership transfer) | src→dst |
+| 22 | COMMIT_OK | — (target observed COMMIT) | dst→src |
 
 ## Phases
 
 1. **HELLO** both ways (version check).
 2. **Module sync** by content hash; the target instantiates immediately
-   (without `__weave_init`) so pages stream directly into place.
+   (without `__weave_init`) so pages stream directly into place. Bundled
+   runners currently initiate a cold cache-miss sync at a guest poll point;
+   its transfer and compilation time precede pre-copy and add to downtime.
+   Every target rejects a core Wasm start section before instantiation: the
+   transformer folds the original start into `__weave_init`, and executing
+   guest code while a target is only staged would violate ownership safety.
 3. **Pre-copy**: any number of MEM_LAYOUT/PAGE frames while the source guest
    keeps executing; ROUND_END/ROUND_ACK delimit full passes (ACK doubles as
    backpressure). All-zero never-sent pages are elided. Dirty detection is
@@ -42,10 +51,26 @@ Framing: `[type: u8][len: u32 LE][payload: len bytes]`. Strings are
 4. **Stop-and-copy**: FINAL_BEGIN, final page delta (which now includes the
    guest's self-spilled call stack and saved globals), GLOBALS, SERVICES,
    FINAL_END.
-5. **Verify/ack**: the target recomputes the state hash; mismatch → ABORT(4)
-   and the source rolls back. Match → RESUME_OK, then the target calls
-   `__weave_resume` on its executor. Until RESUME_OK arrives, the source
-   retains a complete valid checkpoint and can resume locally at any failure.
+5. **Prepare**: the target recomputes the state hash and restores the globals
+   and fresh, isolated service objects. Mismatch or restore failure → ABORT,
+   and the source rolls back. Match → PREPARED. The target remains stopped.
+6. **Commit**: receipt of PREPARED is the source's irreversible ownership
+   boundary. It sends COMMIT and retires locally even if that write or the
+   following acknowledgement is lost. The target may resume only after it
+   receives COMMIT, and then attempts COMMIT_OK. A COMMIT_OK delivery failure
+   cannot revoke target ownership.
+
+Protocol 2 deliberately chooses at-most-one active executor over availability
+during an ambiguous final network failure. Before PREPARED, the source can
+always rewind. After PREPARED, an unconfirmed COMMIT is reported as such and
+the source must not rewind; if COMMIT never reached the target, neither copy
+runs. Node control APIs return `CTL_ERR` with a `commit uncertain:` message in
+that case, even though the source has irreversibly retired; callers must not
+retry by resuming the source. Durable exactly-once failover across
+process/machine crashes would
+require a coordinator or application-level fencing beyond this peer protocol.
+Version-1 peers are rejected during HELLO rather than being allowed to
+misinterpret frame 15's old semantics.
 
 ## State hash
 
@@ -58,33 +83,58 @@ per memory (index order):  u64 LE byte length, then the full contents
 u32 LE  number of control globals
 per global (meta order):   u32 LE name length, name bytes, u32 LE value
 u32 LE  number of services
-per service (sorted by name): u32 LE name length, name bytes,
-                              u64 LE blob length, blob bytes
+per service (UTF-8-byte order): u32 LE name length, name bytes,
+                                u64 LE blob length, blob bytes
 ```
 
 Implemented independently in Rust (`weave-core`), JS (`weave.mjs`) and Go
-(`weave-wazero`); every cross-runtime migration is an implicit conformance
-test of all three.
+(`weave-wazero`). Wasmtime and WAMR share the Rust protocol implementation;
+every cross-runtime migration is an implicit conformance test.
 
 ## Node roles
 
-A *node* (`weave serve`, `weave-node.mjs serve`, `weave-wazero serve`) is
-symmetric: it runs at most one workload, accepts CTL commands, migrates out on
-CTL_MIGRATE (the poll loop picks the request up while the workload runs), and
-accepts incoming migrations when idle (busy nodes ABORT(9) new offers).
-Chains (A→B→C…) fall out of the symmetry.
+A *node* (`weave serve`, `weave-node.mjs serve`, `weave-wazero serve`, or
+`weave-wamr serve`) is symmetric: it runs at most one workload, accepts CTL
+commands, migrates out on CTL_MIGRATE (the poll loop picks the request up while
+the workload runs), and accepts incoming migrations when idle (busy nodes
+ABORT(9) new offers). Chains (A→B→C…) fall out of the symmetry. A browser tab
+has the same source/target behavior but exposes it through the demo UI rather
+than the raw-TCP control API.
+
+Service restore runs only on newly created, non-executing target service
+objects. A `HostService` restore implementation must stage internal state
+without externally visible effects; publishing ownership of a socket, lease,
+or other external resource belongs after COMMIT and requires an
+application-defined fencing scheme. Service names and ordering must match
+exactly before PREPARED.
 
 ## Transports
 
-Native nodes use raw TCP. The JS core (`js/weave.mjs`) is transport-agnostic —
-it needs `{ readExact(n) -> Promise<Uint8Array>, write(bytes) -> Promise }`;
-`weave-node.mjs` provides TCP for Node. In a browser, bridge a WebSocket:
+The JS core (`js/weave.mjs`) is transport-agnostic. It needs
+`{ readExact(n) -> Promise<Uint8Array>, write(bytes) -> Promise }`;
+`weave-node.mjs` supplies TCP and `weave-browser.mjs` supplies a bounded,
+backpressured WebSocket byte stream:
 
 ```js
-const ws = new WebSocket(url); ws.binaryType = "arraybuffer";
-// queue incoming ArrayBuffers and serve readExact from the queue;
-// write = ws.send — then pass that object to SourceMigration/acceptMigration.
+import { acceptRelay, connectRelay } from "./weave-browser.mjs";
+
+const sourceStream = await connectRelay(relayUrl, "wamr");
+const targetStream = await acceptRelay(relayUrl);
 ```
 
-(The browser side then needs a WS↔TCP relay or a WS-listening peer; the frame
-bytes are identical.)
+The root [`demos/browser-wamr`](../demos/browser-wamr/) relay implements both
+directions: `/v1/connect/:alias` dials an allowlisted native target, while
+`/v1/accept` reserves a browser target and pairs it with the next connection
+to a dedicated TCP ingress port. That prefix versions the relay HTTP API, not
+the carried Weave v2 stream. Chrome cannot listen on or dial raw TCP.
+
+Protocol v2 does not authenticate or encrypt its native transport. The demo
+pins tokenless origins to its configured loopback listener, restricts outbound
+targets to aliases, and supports an access token; use `wss://`, explicit
+origins, and a firewall/authenticated native ingress in production.
+
+Targets enforce implementation policy before guest-memory allocation: the
+bundled hosts cap a received module, inspect its declared initial memories
+before instantiation, and default to 1 GiB aggregate linear memory during
+restore. These are deployment limits, not extra wire fields, and custom hosts
+may choose stricter limits.

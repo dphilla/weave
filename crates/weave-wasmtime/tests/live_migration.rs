@@ -11,7 +11,7 @@ use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Val};
 use weave_host::source::SourceOptions;
-use weave_host::HostService;
+use weave_host::{HostService, MemRead};
 use weave_wasmtime::migrate::{accept_conn, migrate_running, MigrateOutcome, TargetFactory};
 use weave_wasmtime::{default_engine, WeaveInstance, WeaveModule, WorkResult};
 
@@ -191,7 +191,11 @@ fn live_migration_wasmtime_to_wasmtime() {
     let src_log = Arc::new(Mutex::new(EmitLog::default()));
     let (services, any, link) = make_instance_parts(src_log.clone());
     let mut inst = WeaveInstance::new_fresh(&engine_src, &module, services, any, link).unwrap();
-    let opts = SourceOptions { budget_bytes: 1 << 20, dirty_page_threshold: 32, max_rounds: 6 };
+    let opts = SourceOptions {
+        budget_bytes: 1 << 20,
+        dirty_page_threshold: 32,
+        max_rounds: 6,
+    };
     let outcome = migrate_running(
         &mut inst,
         "run",
@@ -219,10 +223,19 @@ fn live_migration_wasmtime_to_wasmtime() {
     // continued exactly where the source's left off — the combined emit log
     // equals the golden log.
     assert_eq!(dst_h, golden_h, "final checksum differs after migration");
-    assert_eq!(dst_final_log.entries, golden_log.entries, "emit log not seamless");
-    assert_eq!(dst_final_log.sum, golden_log.sum, "service state not migrated");
+    assert_eq!(
+        dst_final_log.entries, golden_log.entries,
+        "emit log not seamless"
+    );
+    assert_eq!(
+        dst_final_log.sum, golden_log.sum,
+        "service state not migrated"
+    );
     // the source made real progress before migrating
-    assert!(!src_log.lock().unwrap().entries.is_empty(), "no pre-migration progress");
+    assert!(
+        !src_log.lock().unwrap().entries.is_empty(),
+        "no pre-migration progress"
+    );
     // and the target only saw post-migration emissions, yet its log is
     // complete — i.e. service state (not just memory) moved.
     assert!(dst_final_log.entries.len() > src_log.lock().unwrap().entries.len());
@@ -246,9 +259,13 @@ fn migration_failure_rolls_back_and_continues() {
         let mut w = std::io::BufWriter::new(conn);
         // HELLO exchange
         let _ = Frame::read_from(&mut r).unwrap();
-        Frame::Hello { proto: PROTO_VERSION, role: ROLE_TARGET, runtime: "saboteur".into() }
-            .write_to(&mut w)
-            .unwrap();
+        Frame::Hello {
+            proto: PROTO_VERSION,
+            role: ROLE_TARGET,
+            runtime: "saboteur".into(),
+        }
+        .write_to(&mut w)
+        .unwrap();
         std::io::Write::flush(&mut w).unwrap();
         // module sync
         let size = match Frame::read_from(&mut r).unwrap() {
@@ -282,7 +299,10 @@ fn migration_failure_rolls_back_and_continues() {
         &[Val::I32(N)],
         &addr.to_string(),
         "wasmtime",
-        SourceOptions { budget_bytes: 64 << 10, ..Default::default() },
+        SourceOptions {
+            budget_bytes: 64 << 10,
+            ..Default::default()
+        },
     )
     .unwrap();
     saboteur.join().unwrap();
@@ -316,4 +336,30 @@ fn migration_failure_rolls_back_and_continues() {
         }
         MigrateOutcome::Migrated(_) => panic!("migration should have failed"),
     }
+}
+
+#[test]
+fn restore_target_starts_from_an_all_zero_memory_baseline() {
+    let raw = wat::parse_str(
+        r#"
+        (module
+          (memory (export "memory") 1)
+          (data (i32.const 16) "active data must not survive restore setup")
+          (func (export "run") (result i32) (i32.const 0)))
+        "#,
+    )
+    .unwrap();
+    let module = WeaveModule::from_raw(&raw, &Default::default()).unwrap();
+    let engine = default_engine().unwrap();
+    let link: weave_wasmtime::instance::LinkFn = Box::new(|_| Ok(()));
+
+    let mut instance = WeaveInstance::new_restored(&engine, &module, vec![], vec![], link).unwrap();
+    let memories = instance.mem_view().unwrap();
+
+    let mut page = vec![1u8; weave_core::WASM_PAGE_SIZE];
+    memories.read(0, 0, &mut page);
+    assert!(
+        page.iter().all(|byte| *byte == 0),
+        "restore targets must erase active data segments before applying sparse pages"
+    );
 }

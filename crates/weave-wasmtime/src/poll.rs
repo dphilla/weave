@@ -7,9 +7,9 @@
 //! this function decides on each call, using the guest's *own* paused memory.
 
 use crate::instance::Ctx;
+use wasmtime::{Caller, Linker, Memory};
 use weave_host::source::SourceMigration;
 use weave_host::MemRead;
-use wasmtime::{Caller, Linker, Memory};
 
 /// What the next `poll` should do.
 pub enum Poller {
@@ -21,7 +21,10 @@ pub enum Poller {
     UnwindAfter(u64),
     /// Active live migration: each poll advances pre-copy and unwinds once the
     /// dirty set has converged.
-    Migrating { mig: Box<SourceMigration>, mem_names: Vec<String> },
+    Migrating {
+        mig: Box<SourceMigration>,
+        mem_names: Vec<String>,
+    },
     /// A migration step failed; unwind so the caller can rewind locally.
     Errored(String),
 }
@@ -71,7 +74,7 @@ pub fn install_poll(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
                 .data()
                 .shared
                 .as_ref()
-                .and_then(|s| s.lock().unwrap().request.clone());
+                .and_then(|s| s.lock().unwrap().requested_target());
             if let Some(target) = request {
                 let d = caller.data();
                 let (wasm, meta_bytes, mem_names, opts, runtime) = (
@@ -90,15 +93,16 @@ pub fn install_poll(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
                     opts,
                 ) {
                     Ok(mig) => {
-                        poller = Poller::Migrating { mig: Box::new(mig), mem_names };
+                        poller = Poller::Migrating {
+                            mig: Box::new(mig),
+                            mem_names,
+                        };
                     }
                     Err(e) => {
                         // Can't reach the target: keep running, report, clear.
                         if let Some(sh) = &caller.data().shared {
                             let mut sh = sh.lock().unwrap();
-                            sh.last_result =
-                                Some(format!("migration failed to start: {e:#}"));
-                            sh.request = None;
+                            sh.complete_request(format!("migration failed to start: {e:#}"));
                         }
                     }
                 }

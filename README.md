@@ -1,12 +1,15 @@
 # Weave
 
-**Live migration for running WebAssembly workloads, across machines and across
-runtimes.** Weave moves a *currently executing* Wasm module — its code, linear
-memory, globals, tables, host-service state, and the live call stack down to
-the exact instruction — from one spec-compliant runtime to another, where it
+**Live migration for portable WebAssembly workloads, across machines and
+across runtimes.** Weave moves a *currently executing* woven module — its
+code, linear memory, globals, tables, host-service state, and live call stack
+down to the exact instruction — between supported runtime adapters, where it
 resumes as if nothing happened.
 
-Verified end-to-end (all cases byte-identical to an uninterrupted run):
+Verified end-to-end. The native/Node/wazero matrix compares the complete
+host-visible event stream with an uninterrupted golden run; the real Chrome
+smoke checks that the first newly observed event has the exact next counter
+index at every runtime boundary:
 
 | # | scenario | verified |
 |---|----------|----------|
@@ -16,10 +19,13 @@ Verified end-to-end (all cases byte-identical to an uninterrupted run):
 | 4 | wasmtime → wazero (pure Go) → Node.js triple chain | ✅ |
 | 5 | Rust/LLVM-compiled guest migrated mid-computation | ✅ |
 | 6 | checkpoint-to-file → restore on a fresh process | ✅ |
-| 7 | mid-migration failure → source rewinds locally, continues seamlessly | ✅ |
+| 7 | pre-commit migration failure → source rewinds locally, continues seamlessly | ✅ |
 | 8 | funcref table mutation, passive-segment semantics, SIMD state, deep/mutual recursion across checkpoints | ✅ |
+| 9 | wasmtime → WAMR → wasmtime, including multiple memories and a cleared active data segment | ✅ |
+| 10 | Chrome → WAMR → Chrome → WAMR through WebSocket↔TCP relay | ✅ |
 
-Run the whole matrix: `./scripts/e2e.sh`
+Run the native/Node/wazero matrix with `./scripts/e2e.sh`. The optional real
+Chrome/WAMR flow and its prerequisites live in [`demos/browser-wamr`](demos/browser-wamr/).
 
 ## How is that possible?
 
@@ -35,38 +41,42 @@ execution state using nothing but standard Wasm semantics**:
 - A single injected import, `weave.poll: [] -> [i32]`, is called at function
   entries and loop back-edges (amortized by an in-guest countdown). When it
   returns nonzero, every frame spills its locals and program counter into a
-  shadow stack **inside linear memory** and returns; the whole native stack
-  unwinds in microseconds.
+  shadow stack **inside linear memory** and returns; the measured fixtures
+  unwind in microseconds (cost scales with live call depth and saved state).
 - `__weave_resume` rebuilds the stack frame-by-frame from that shadow stack
   and continues at the exact instruction after the poll.
 
 Because the shadow stack, saved globals, and funcref-table shadows all live in
 linear memory, **a complete snapshot is just: memory bytes + a handful of
 exported i32 control globals + host-service blobs**. Any embedder that can
-read/write an exported memory, get/set an exported i32 global, and call an
-export can host a migration — that's every spec-compliant runtime, with no
-WASI and no engine internals.
+read/write an exported memory, get/set an exported i32 global, call an export,
+and provide the workload's host imports can host a migration. No engine stack
+API is required.
 
 ## Live migration ("it never stopped")
 
 Weave streams state vMotion-style, amortizing the transfer while the workload
-keeps running:
+keeps running after the module has been synchronized:
 
 1. **Pre-copy:** the source keeps executing; each `poll` streams a bounded
-   budget of dirty 4 KiB pages (tracked by truncated SHA-256) peer-to-peer
-   over TCP to the target, which applies them straight into a
+   budget of dirty 4 KiB pages (tracked by truncated SHA-256) over a byte
+   stream to the target, which applies them straight into a
    ready-instantiated instance. Rounds iterate until the dirty set converges.
-2. **Stop-and-copy:** the guest unwinds (microseconds), and only the final
-   delta — typically **0–2 pages** in our tests — plus control globals and
-   service blobs cross during the pause.
-3. **Verify & resume:** the target recomputes a SHA-256 over the *entire*
-   received state and must match the source's hash before `__weave_resume`
-   runs. On any failure at any point, the source rewinds locally and continues
-   — migration is always safe to abandon.
+2. **Stop-and-copy:** the guest's stack-unwind mechanism itself takes
+   microseconds. The remaining pause includes transfer of the final delta —
+   typically **0–2 pages** in our tests, but potentially much larger for a
+   high-dirty workload — plus target verification and commit.
+3. **Verify & commit:** the target recomputes a SHA-256 over the *entire*
+   received state and stages it without executing. It sends `PREPARED`; the
+   source then sends an irreversible `COMMIT` and retires, and only then may
+   the target run `__weave_resume`. Before `PREPARED`, failure rewinds locally.
+   After it, a lost confirmation is reported as an uncertain commit and never
+   causes both copies to execute (availability can be lost, but ownership is
+   not duplicated).
 
-Host functions with state (counters, accumulators, open resources) implement
-the `HostService` interface: their state serializes into the snapshot and is
-restored on the peer, so "external-but-interfaced" state moves too.
+Host functions with portable state implement the `HostService` interface:
+their state serializes into the snapshot and is restored on the peer, so
+explicitly modeled "external-but-interfaced" state moves too.
 
 ## Layout
 
@@ -77,12 +87,18 @@ crates/weave-host        engine-agnostic: page tracker, migration source/target
 crates/weave-wasmtime    wasmtime plugin (poll host fn, instance, serve node)
 crates/weave-cli         `weave` binary: transform/run/checkpoint/restore/serve/migrate
 js/weave.mjs             plugin for JS runtimes (browser-clean core: standard WebAssembly API)
+js/weave-browser.mjs     bounded WebSocket byte-stream adapter for browsers
 js/weave-node.mjs        Node.js node runner (TCP transport + CLI)
 go/weave-wazero          wazero (pure-Go) node runner
+wamr/                    WAMR 2.4.4 adapter and symmetric node CLI
+demos/                   runnable examples, including Chrome ↔ WAMR
 guests/                  test guests (WAT + Rust wasm32-unknown-unknown)
 docs/                    DESIGN.md, ABI.md, PROTOCOL.md
-scripts/e2e.sh           the full cross-runtime verification matrix
+scripts/e2e.sh           automated wasmtime/Node/wazero verification matrix
 ```
+
+For a real browser round trip, continue with the
+[`Chrome ↔ WAMR demo`](demos/browser-wamr/README.md).
 
 ## Quickstart
 
@@ -90,7 +106,7 @@ scripts/e2e.sh           the full cross-runtime verification matrix
 cargo build -p weave-cli
 W=target/debug/weave
 
-# instrument a module (any core-wasm module; no WASI, no source changes)
+# instrument a supported core-Wasm module (no source changes)
 $W transform app.wasm -o app.woven.wasm
 
 # node B (empty, will receive)
@@ -112,7 +128,7 @@ $W restore    app.woven.wasm app.snap --pre-woven   # resumes exactly where it s
 
 ## Support matrix
 
-Weave supports full core Wasm 2.0: MVP, multi-value, sign-extension,
+The transformer supports core Wasm 2.0: MVP, multi-value, sign-extension,
 saturating truncation, bulk memory, reference types (funcref), SIMD (v128),
 multiple memories, and `return_call*` (lowered to call+return). Funcref tables
 may be mutated and grown at runtime — Weave shadows every funcref with its
@@ -130,6 +146,13 @@ boundaries, not gaps):
   migratable);
 - exceptions, GC types, memory64.
 
+Runtime capabilities still have to overlap. The bundled WAMR CLI enables the
+classic interpreter, bulk memory, SIMD, reference types, and multiple
+memories, and currently supplies only the three `env.emit*` sample services.
+Chrome cannot directly start an export with a public `v128` parameter or
+result; use a scalar guest wrapper. It can receive and resume a workload whose
+internal state uses SIMD.
+
 ## Guarantees & caveats
 
 - State moves **bit-exactly** (including NaN payloads); an end-to-end SHA-256
@@ -141,5 +164,20 @@ boundaries, not gaps):
 - Nondeterministic *hosts* (a service returning wall-clock time, say) remain
   nondeterministic; Weave moves state faithfully but does not make your host
   functions pure.
+- Every target requires an exact, byte-compatible host-service set. Open
+  files, sockets, DOM nodes, JavaScript closures, GPU objects, and arbitrary
+  WASI state do not migrate unless modeled by such a service.
+- Native protocol-v2 nodes speak unauthenticated TCP. The browser demo is
+  loopback-only by default; use its token/origin controls and terminate TLS
+  before exposing it to a network.
+- Incoming modules are capped at 512 MiB in Rust/JS (256 MiB in wazero), and
+  aggregate memory accepted at handoff is capped at 1 GiB by default. This is
+  not a lifetime cap on later guest `memory.grow` instructions.
+- A target cache miss synchronizes and compiles the module before pre-copy.
+  The current runners start that work at a guest poll point, so cold transfer
+  time is additional downtime and can dominate for a large module. Distribute
+  or pre-warm the content-addressed module on targets when low pause time is a
+  requirement. The same applies to a very large final dirty set or full-state
+  verification; the migration stays bounded-memory, not constant-latency.
 - One workload per node process at a time (a node that migrated its workload
   away becomes idle and can receive another).

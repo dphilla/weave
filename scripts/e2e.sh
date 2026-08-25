@@ -10,16 +10,18 @@
 #   5. live migration Node(V8) → wasmtime   (cross-runtime, reverse)
 #   6. chain: wasmtime → Node → wasmtime    (workload crosses 3 processes)
 #   7. Rust/LLVM-compiled guest migrated mid-render
+#   8. wasmtime → wazero and wazero → wasmtime
+#   9. chain: wasmtime → wazero → Node
 # Every case is verified for *seamlessness*: the concatenated host-service
 # output of all hops must be byte-identical to an uninterrupted golden run.
 
-set -u
+set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 T="$(mktemp -d)"
 W="$ROOT/target/debug/weave"
 NODE_W="node $ROOT/js/weave-node.mjs"
-GO_W="$ROOT/go/weave-wazero/weave-wazero"
+GO_W="$T/weave-wazero"
 PASS=0
 FAIL=0
 declare -a FAILED_CASES=()
@@ -33,9 +35,11 @@ trap cleanup EXIT
 emits() { grep -E '^EMIT|^WEAVE_DONE' "$@" ; }
 
 say "building"
-cargo build -p weave-cli 2>&1 | tail -1
-(cd guests/mandel && cargo build --release --target wasm32-unknown-unknown 2>&1 | tail -1)
-(cd go/weave-wazero && go build -o weave-wazero .)
+cargo build -p weave-cli 2>&1 | tail -1 || { bad "build weave-cli"; exit 1; }
+(cd guests/mandel && cargo build --release --target wasm32-unknown-unknown 2>&1 | tail -1) \
+  || { bad "build mandel guest"; exit 1; }
+(cd go/weave-wazero && go build -o "$GO_W" .) \
+  || { bad "build weave-wazero"; exit 1; }
 
 say "1. transform + golden runs"
 "$W" transform guests/counter.wat -o "$T/counter.wasm" || { bad transform; exit 1; }

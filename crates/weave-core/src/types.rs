@@ -69,25 +69,37 @@ impl Val {
     pub fn i32(v: i32) -> Self {
         let mut b = [0u8; 16];
         b[..4].copy_from_slice(&v.to_le_bytes());
-        Val { ty: ValType::I32, bits: b }
+        Val {
+            ty: ValType::I32,
+            bits: b,
+        }
     }
 
     pub fn i64(v: i64) -> Self {
         let mut b = [0u8; 16];
         b[..8].copy_from_slice(&v.to_le_bytes());
-        Val { ty: ValType::I64, bits: b }
+        Val {
+            ty: ValType::I64,
+            bits: b,
+        }
     }
 
     pub fn f32_bits(v: u32) -> Self {
         let mut b = [0u8; 16];
         b[..4].copy_from_slice(&v.to_le_bytes());
-        Val { ty: ValType::F32, bits: b }
+        Val {
+            ty: ValType::F32,
+            bits: b,
+        }
     }
 
     pub fn f64_bits(v: u64) -> Self {
         let mut b = [0u8; 16];
         b[..8].copy_from_slice(&v.to_le_bytes());
-        Val { ty: ValType::F64, bits: b }
+        Val {
+            ty: ValType::F64,
+            bits: b,
+        }
     }
 
     pub fn as_i32(&self) -> i32 {
@@ -112,13 +124,14 @@ impl Val {
     }
 
     pub fn read_from(buf: &[u8], pos: &mut usize) -> Result<Self> {
-        if buf.len() < *pos + 17 {
-            bail!("truncated Val");
-        }
+        let end = (*pos)
+            .checked_add(17)
+            .filter(|end| *end <= buf.len())
+            .ok_or_else(|| anyhow::anyhow!("truncated Val"))?;
         let ty = ValType::from_code(buf[*pos])?;
         let mut bits = [0u8; 16];
-        bits.copy_from_slice(&buf[*pos + 1..*pos + 17]);
-        *pos += 17;
+        bits.copy_from_slice(&buf[*pos + 1..end]);
+        *pos = end;
         Ok(Val { ty, bits })
     }
 }
@@ -148,57 +161,63 @@ pub fn put_u64(out: &mut Vec<u8>, v: u64) {
 }
 
 pub fn get_u8(buf: &[u8], pos: &mut usize) -> Result<u8> {
-    if *pos + 1 > buf.len() {
-        bail!("truncated u8");
-    }
+    let end = (*pos)
+        .checked_add(1)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("truncated u8"))?;
     let v = buf[*pos];
-    *pos += 1;
+    *pos = end;
     Ok(v)
 }
 
 pub fn get_u16(buf: &[u8], pos: &mut usize) -> Result<u16> {
-    if *pos + 2 > buf.len() {
-        bail!("truncated u16");
-    }
-    let v = u16::from_le_bytes(buf[*pos..*pos + 2].try_into().unwrap());
-    *pos += 2;
+    let end = (*pos)
+        .checked_add(2)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("truncated u16"))?;
+    let v = u16::from_le_bytes(buf[*pos..end].try_into().unwrap());
+    *pos = end;
     Ok(v)
 }
 
 pub fn get_u32(buf: &[u8], pos: &mut usize) -> Result<u32> {
-    if *pos + 4 > buf.len() {
-        bail!("truncated u32");
-    }
-    let v = u32::from_le_bytes(buf[*pos..*pos + 4].try_into().unwrap());
-    *pos += 4;
+    let end = (*pos)
+        .checked_add(4)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("truncated u32"))?;
+    let v = u32::from_le_bytes(buf[*pos..end].try_into().unwrap());
+    *pos = end;
     Ok(v)
 }
 
 pub fn get_u64(buf: &[u8], pos: &mut usize) -> Result<u64> {
-    if *pos + 8 > buf.len() {
-        bail!("truncated u64");
-    }
-    let v = u64::from_le_bytes(buf[*pos..*pos + 8].try_into().unwrap());
-    *pos += 8;
+    let end = (*pos)
+        .checked_add(8)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("truncated u64"))?;
+    let v = u64::from_le_bytes(buf[*pos..end].try_into().unwrap());
+    *pos = end;
     Ok(v)
 }
 
 pub fn get_str(buf: &[u8], pos: &mut usize) -> Result<String> {
     let n = get_u32(buf, pos)? as usize;
-    if *pos + n > buf.len() {
-        bail!("truncated string");
-    }
-    let s = std::str::from_utf8(&buf[*pos..*pos + n])?.to_string();
-    *pos += n;
+    let end = (*pos)
+        .checked_add(n)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("truncated string"))?;
+    let s = std::str::from_utf8(&buf[*pos..end])?.to_string();
+    *pos = end;
     Ok(s)
 }
 
 pub fn get_bytes(buf: &[u8], pos: &mut usize) -> Result<Vec<u8>> {
     let n = get_u32(buf, pos)? as usize;
-    if *pos + n > buf.len() {
-        bail!("truncated bytes");
-    }
-    let b = buf[*pos..*pos + n].to_vec();
-    *pos += n;
+    let end = (*pos)
+        .checked_add(n)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("truncated bytes"))?;
+    let b = buf[*pos..end].to_vec();
+    *pos = end;
     Ok(b)
 }

@@ -24,7 +24,7 @@ pub struct Snapshot {
     pub memories: Vec<Vec<u8>>,
     /// (export name, value) for each control global, in meta order.
     pub globals: Vec<(String, i32)>,
-    /// (service name, opaque state blob), sorted by name.
+    /// (service name, opaque state blob), sorted by UTF-8 name bytes.
     pub services: Vec<(String, Vec<u8>)>,
 }
 
@@ -134,12 +134,14 @@ impl Snapshot {
         let n_mems = get_u32(buf, &mut pos)? as usize;
         let mut memories = Vec::with_capacity(n_mems);
         for _ in 0..n_mems {
-            let len = get_u64(buf, &mut pos)? as usize;
-            if buf.len() < pos + len {
-                bail!("snapshot: truncated memory");
-            }
-            memories.push(buf[pos..pos + len].to_vec());
-            pos += len;
+            let len = usize::try_from(get_u64(buf, &mut pos)?)
+                .map_err(|_| anyhow::anyhow!("snapshot: memory length does not fit host"))?;
+            let end = pos
+                .checked_add(len)
+                .filter(|end| *end <= buf.len())
+                .ok_or_else(|| anyhow::anyhow!("snapshot: truncated memory"))?;
+            memories.push(buf[pos..end].to_vec());
+            pos = end;
         }
         let n_globals = get_u32(buf, &mut pos)? as usize;
         let mut globals = Vec::with_capacity(n_globals);
@@ -160,7 +162,16 @@ impl Snapshot {
         }
         let mut expect = [0u8; 32];
         expect.copy_from_slice(&buf[pos..pos + 32]);
-        let snap = Snapshot { module_hash, memories, globals, services };
+        pos += 32;
+        if pos != buf.len() {
+            bail!("snapshot: trailing bytes");
+        }
+        let snap = Snapshot {
+            module_hash,
+            memories,
+            globals,
+            services,
+        };
         if snap.state_hash() != expect {
             bail!("snapshot: state hash mismatch (corrupt snapshot)");
         }
@@ -176,7 +187,10 @@ mod tests {
     fn roundtrip_and_integrity() {
         let snap = Snapshot {
             module_hash: [7u8; 32],
-            memories: vec![vec![0u8; crate::WASM_PAGE_SIZE], vec![9u8; crate::WASM_PAGE_SIZE * 2]],
+            memories: vec![
+                vec![0u8; crate::WASM_PAGE_SIZE],
+                vec![9u8; crate::WASM_PAGE_SIZE * 2],
+            ],
             globals: vec![("__weave_state".into(), 1), ("__weave_sp".into(), 65536)],
             services: vec![("env".into(), vec![1, 2, 3])],
         };

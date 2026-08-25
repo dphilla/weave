@@ -40,7 +40,10 @@ pub struct ScanOutput {
 
 impl PageTracker {
     pub fn new(n_mems: usize) -> Self {
-        PageTracker { digests: vec![Vec::new(); n_mems], round: 0 }
+        PageTracker {
+            digests: vec![Vec::new(); n_mems],
+            round: 0,
+        }
     }
 
     fn is_zero(buf: &[u8]) -> bool {
@@ -56,7 +59,10 @@ impl PageTracker {
         cursor: &mut ScanCursor,
         budget_bytes: usize,
     ) -> ScanOutput {
-        let mut out = ScanOutput { pages: Vec::new(), round_complete: false };
+        let mut out = ScanOutput {
+            pages: Vec::new(),
+            round_complete: false,
+        };
         let mut scanned = 0usize;
         let n = mems.n_mems();
         let mut buf = vec![0u8; WPAGE_SIZE];
@@ -99,17 +105,48 @@ impl PageTracker {
     }
 
     /// One full synchronous pass (used for the final stop-and-copy delta and
-    /// by hosts that don't budget).
-    pub fn scan_full(&mut self, mems: &dyn MemRead) -> Vec<(u8, u64, Vec<u8>)> {
-        let mut cursor = ScanCursor::default();
-        let mut all = Vec::new();
-        loop {
-            let step = self.scan_step(mems, &mut cursor, usize::MAX);
-            all.extend(step.pages);
-            if step.round_complete {
-                return all;
+    /// by hosts that don't budget). The callback is invoked one page at a
+    /// time, so even a fully dirty maximum-size workload does not materialize
+    /// another memory-sized `Vec` while the source is paused.
+    pub fn scan_full_with<E>(
+        &mut self,
+        mems: &dyn MemRead,
+        mut emit: impl FnMut(u8, u64, Vec<u8>) -> Result<(), E>,
+    ) -> Result<u64, E> {
+        let mut dirty = 0u64;
+        let mut buf = vec![0u8; WPAGE_SIZE];
+        for mem in 0..mems.n_mems() {
+            let n_pages = mems.size(mem) / WPAGE_SIZE;
+            if self.digests[mem].len() < n_pages {
+                self.digests[mem].resize(n_pages, ZERO_DIGEST_SENTINEL);
+            }
+            for page in 0..n_pages {
+                mems.read(mem, page * WPAGE_SIZE, &mut buf);
+                let prev = self.digests[mem][page];
+                if prev == ZERO_DIGEST_SENTINEL && Self::is_zero(&buf) {
+                    continue;
+                }
+                let digest = page_digest(&buf);
+                if digest != prev {
+                    self.digests[mem][page] = digest;
+                    emit(mem as u8, page as u64, buf.clone())?;
+                    dirty += 1;
+                }
             }
         }
+        self.round += 1;
+        Ok(dirty)
+    }
+
+    /// Collecting convenience used by small tests and non-wire callers.
+    pub fn scan_full(&mut self, mems: &dyn MemRead) -> Vec<(u8, u64, Vec<u8>)> {
+        let mut all = Vec::new();
+        self.scan_full_with(mems, |mem, page, bytes| {
+            all.push((mem, page, bytes));
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap();
+        all
     }
 }
 
@@ -151,5 +188,24 @@ mod tests {
         mem.0[0].extend_from_slice(&vec![1u8; WPAGE_SIZE]);
         let d = tr.scan_full(&mem);
         assert_eq!(d.iter().map(|p| p.1).collect::<Vec<_>>(), vec![8]);
+    }
+
+    #[test]
+    fn final_scan_streams_a_high_dirty_set_page_by_page() {
+        const PAGES: usize = 4096;
+        let mem = FakeMem(vec![vec![1u8; WPAGE_SIZE * PAGES]]);
+        let mut tracker = PageTracker::new(1);
+        let mut emitted = 0u64;
+        let count = tracker
+            .scan_full_with(&mem, |memory, page, bytes| {
+                assert_eq!(memory, 0);
+                assert_eq!(page, emitted);
+                assert_eq!(bytes.len(), WPAGE_SIZE);
+                emitted += 1;
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap();
+        assert_eq!(count, PAGES as u64);
+        assert_eq!(emitted, PAGES as u64);
     }
 }

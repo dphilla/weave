@@ -1,13 +1,14 @@
 //! weave-transform: the instrumenting compiler at the heart of Weave.
 //!
-//! Rewrites an arbitrary core-Wasm module so that its *live execution state* —
-//! the operand stack, locals, call frames, program counters, application
-//! globals, and funcref table contents — can be captured into, and rebuilt
-//! from, plain linear memory using nothing but standard wasm semantics. This
-//! is what makes migration possible across *any* spec-compliant runtime: the
-//! host needs no stack introspection, no runtime internals, no WASI — only the
-//! ordinary embedding API (call an export, read/write an exported memory and a
-//! few exported i32 globals).
+//! Rewrites a module in Weave's supported single-threaded core-Wasm subset so
+//! that its *live execution state* — the operand stack, locals, call frames,
+//! program counters, application globals, and funcref table contents — can be
+//! captured into, and rebuilt from, plain linear memory using standard Wasm
+//! semantics. This enables migration across supported adapters with an
+//! overlapping Wasm feature set: the host needs no stack introspection or
+//! runtime internals, only the ordinary embedding API (call an export,
+//! read/write exported memories, and access a few exported i32 globals) plus
+//! implementations for the workload's explicit host imports.
 //!
 //! ## How it works
 //!

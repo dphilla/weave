@@ -19,139 +19,27 @@ import {
   WeaveInstance, SourceMigration, acceptMigration, readFrame, frame,
   Writer, FT, G, FLAG_DONE, PROTO_VERSION,
 } from "./weave.mjs";
+import {
+  OutboundMigrationAdmission,
+  TargetAdmission,
+} from "./weave-node-admission.mjs";
+import {
+  connectTcp,
+  readFirstSocketByte,
+  TcpTransport,
+} from "./weave-node-transport.mjs";
+import { makeEmitServices } from "./weave-node-services.mjs";
 
 // ---------------------------------------------------------------- transport
 
-class TcpTransport {
-  constructor(socket) {
-    this.socket = socket;
-    this.chunks = [];
-    this.len = 0;
-    this.waiters = [];
-    this.err = null;
-    socket.on("data", (buf) => {
-      this.chunks.push(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength).slice());
-      this.len += buf.length;
-      this._pump();
-    });
-    socket.on("error", (e) => {
-      this.err = e;
-      this._pump();
-    });
-    socket.on("close", () => {
-      this.err = this.err ?? new Error("connection closed");
-      this._pump();
-    });
-  }
-
-  _pump() {
-    while (this.waiters.length) {
-      const w = this.waiters[0];
-      if (this.len >= w.n) {
-        this.waiters.shift();
-        w.resolve(this._take(w.n));
-      } else if (this.err) {
-        this.waiters.shift();
-        w.reject(this.err);
-      } else {
-        break;
-      }
-    }
-  }
-
-  _take(n) {
-    const out = new Uint8Array(n);
-    let off = 0;
-    while (off < n) {
-      const head = this.chunks[0];
-      const take = Math.min(head.length, n - off);
-      out.set(head.subarray(0, take), off);
-      off += take;
-      if (take === head.length) this.chunks.shift();
-      else this.chunks[0] = head.subarray(take);
-      this.len -= take;
-    }
-    return out;
-  }
-
-  readExact(n) {
-    return new Promise((resolve, reject) => {
-      this.waiters.push({ n, resolve, reject });
-      this._pump();
-    });
-  }
-
-  write(bytes) {
-    return new Promise((resolve, reject) => {
-      this.socket.write(Buffer.from(bytes), (e) => (e ? reject(e) : resolve()));
-    });
-  }
-}
-
 function connect(addr) {
   const [host, port] = splitAddr(addr);
-  return new Promise((resolve, reject) => {
-    const sock = net.connect({ host, port, noDelay: true }, () => resolve(new TcpTransport(sock)));
-    sock.on("error", reject);
-  });
+  return connectTcp(host, port);
 }
 
 function splitAddr(addr) {
   const i = addr.lastIndexOf(":");
   return [addr.slice(0, i), Number(addr.slice(i + 1))];
-}
-
-// ---------------------------------------------------------------- services
-
-const MASK64 = (1n << 64n) - 1n;
-const toI64 = (v) => BigInt.asIntN(64, v & MASK64);
-
-function makeEmitServices() {
-  const mk = (name, print) => {
-    const st = { count: 0n, sum: 0n };
-    return {
-      state: st,
-      imports: { env: { [name.split(".")[1]]: print(st) } },
-      snapshot() {
-        const b = new Uint8Array(16);
-        const dv = new DataView(b.buffer);
-        dv.setBigUint64(0, st.count & MASK64, true);
-        dv.setBigInt64(8, toI64(st.sum), true);
-        return b;
-      },
-      restore(blob) {
-        const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
-        st.count = dv.getBigUint64(0, true);
-        st.sum = dv.getBigInt64(8, true);
-      },
-    };
-  };
-  const services = new Map();
-  services.set(
-    "env.emit",
-    mk("env.emit", (st) => (i, h) => {
-      st.count += 1n;
-      st.sum = toI64(st.sum + h + BigInt(i));
-      console.log(`EMIT ${i} ${h}`);
-    }),
-  );
-  services.set(
-    "env.emit32",
-    mk("env.emit32", (st) => (v) => {
-      st.count += 1n;
-      st.sum = toI64(st.sum + BigInt(v));
-      console.log(`EMIT32 ${v}`);
-    }),
-  );
-  services.set(
-    "env.emit64",
-    mk("env.emit64", (st) => (v) => {
-      st.count += 1n;
-      st.sum = toI64(st.sum + v);
-      console.log(`EMIT64 ${v}`);
-    }),
-  );
-  return services;
 }
 
 // ---------------------------------------------------------------- args
@@ -227,29 +115,45 @@ async function cmdServe(opts) {
   };
   const moduleCache = new Map();
 
-  const shared = { request: null, lastResult: null };
-  let busy = false;
+  const shared = { lastResult: null };
+  const admission = new TargetAdmission(opts.flags.has("module"));
+  const outbound = new OutboundMigrationAdmission(() => admission.isRunning());
+
+  const completeOutbound = (request, message) => {
+    // Only the owner may publish a request outcome. This identity check keeps a
+    // delayed failure from resolving or overwriting a later control request.
+    if (request !== null && outbound.current() !== request) return false;
+    shared.lastResult = message;
+    return request === null || outbound.complete(request, message);
+  };
+
+  const closeMigration = (migration) => {
+    try { migration?.t.close?.(); } catch { /* best-effort transport cleanup */ }
+  };
 
   // Workload driver: runs inst cooperatively; carries out migration when
   // requested; returns "migrated" | "done".
   async function driveWorkload(inst, entry, args) {
-    busy = true;
+    admission.startRunning();
     let migration = null;
+    let migrationRequest = null;
     try {
       const res = await inst.drive(entry, args, async () => {
         // At every unwind-yield: let the event loop breathe so ctl/data
         // connections are serviced.
         await new Promise((r) => setImmediate(r));
-        if (migration === null && shared.request) {
-          const target = shared.request;
+        if (migration === null && outbound.current() !== null) {
+          const request = outbound.current();
           try {
-            const t = await connect(target);
+            const t = await connect(request.target);
             migration = new SourceMigration(t, inst, "node", sourceOpts);
             await migration.handshake();
+            migrationRequest = request;
           } catch (e) {
-            shared.lastResult = `migration failed to start: ${e.message}`;
-            shared.request = null;
+            completeOutbound(request, `migration failed to start: ${e.message}`);
+            closeMigration(migration);
             migration = null;
+            migrationRequest = null;
           }
         }
         if (migration) {
@@ -257,9 +161,10 @@ async function cmdServe(opts) {
             const ready = await migration.precopyStep();
             if (ready) return "hold"; // stay unwound: state is checkpointed
           } catch (e) {
-            shared.lastResult = `migration failed: ${e.message}`;
-            shared.request = null;
+            completeOutbound(migrationRequest, `migration failed: ${e.message}`);
+            closeMigration(migration);
             migration = null;
+            migrationRequest = null;
           }
         }
         return "continue";
@@ -270,25 +175,28 @@ async function cmdServe(opts) {
           try {
             await migration.t.write(frame(FT.ABORT, new Writer().u32(10).str("completed before checkpoint").out()));
           } catch {}
-          shared.request = null;
+          closeMigration(migration);
         }
         const msg = `done: ${renderResults(res.results)}`;
         console.log(`WEAVE_DONE ${renderResults(res.results)}`);
-        shared.lastResult = msg;
+        completeOutbound(migrationRequest ?? outbound.current(), msg);
         return "done";
       }
       // held: guest is unwound with a converged pre-copy — go final.
       const stats = await migration.finish();
-      const msg = `migrated: ${stats.rounds} rounds, ${stats.totalPages} pages total, ${stats.finalPages} in pause window`;
+      closeMigration(migration);
+      const summary = `${stats.rounds} rounds, ${stats.totalPages} pages total, ${stats.finalPages} in pause window`;
+      const msg = stats.commitConfirmed
+        ? `migrated: ${summary}`
+        : `commit uncertain: ${summary}; COMMIT_OK unconfirmed — source retired (${stats.commitError})`;
       console.error(`weave: ${msg}`);
-      console.log("WEAVE_MIGRATED");
-      shared.lastResult = msg;
-      shared.request = null;
+      console.log(stats.commitConfirmed ? "WEAVE_MIGRATED" : "WEAVE_MIGRATED_UNCONFIRMED");
+      completeOutbound(migrationRequest, msg);
       return "migrated";
     } catch (e) {
       // migration failed after unwind: resume locally, seamlessly
-      shared.lastResult = `migration failed: ${e.message}`;
-      shared.request = null;
+      completeOutbound(migrationRequest, `migration failed: ${e.message}`);
+      closeMigration(migration);
       console.error(`weave: migration failed (${e.message}), resuming locally`);
       const res = await inst.drive(null, null, async () => "continue");
       const msg = `done: ${renderResults(res.results)}`;
@@ -296,7 +204,7 @@ async function cmdServe(opts) {
       shared.lastResult = msg;
       return "done";
     } finally {
-      busy = false;
+      admission.finishRunning();
     }
   }
 
@@ -306,57 +214,79 @@ async function cmdServe(opts) {
     }
   };
 
-  const server = net.createServer({ noDelay: true }, (sock) => {
-    sock.once("readable", async () => {
-      const first = sock.read(1);
-      if (first === null) return;
-      sock.unshift(first);
-      const t = new TcpTransport(sock);
-      try {
-        if (first[0] === FT.HELLO) {
-          if (busy) {
+  const server = net.createServer({ noDelay: true }, async (sock) => {
+    let first;
+    try {
+      first = await readFirstSocketByte(sock);
+    } catch (error) {
+      console.error(`weave: connection classification failed: ${error.message}`);
+      try { sock.destroy(); } catch {}
+      return;
+    }
+
+    const t = new TcpTransport(sock);
+    let incomingReservation = null;
+    try {
+      if (first === FT.HELLO) {
+          incomingReservation = admission.tryReserve();
+          if (incomingReservation === null) {
             await t.write(frame(FT.ABORT, new Writer().u32(9).str("node busy").out()));
             sock.end();
             return;
           }
-          const { inst, sourceRuntime } = await acceptMigration(t, makeEmitServices, {
+          shared.lastResult = null;
+          const { inst, sourceRuntime, commitAckError } = await acceptMigration(t, makeEmitServices, {
             runtimeName: "node",
             moduleCache,
             yieldMs,
           });
+          // acceptMigration returns only after COMMIT. Transition directly
+          // from accepting to running in this turn, before any further await.
+          admission.commit(incomingReservation);
+          incomingReservation = null;
+          if (commitAckError) {
+            console.error(`weave: COMMIT received but COMMIT_OK delivery failed (${commitAckError}); resuming as owner`);
+          }
           console.error(`weave: workload received from ${sourceRuntime}, resuming`);
           sock.end();
           const outcome = await driveWorkload(inst, null, null);
           maybeExit(outcome);
-        } else if (first[0] === FT.CTL_MIGRATE) {
+      } else if (first === FT.CTL_MIGRATE) {
           const f = await readFrame(t);
           const c = new DataView(f.payload.buffer, f.payload.byteOffset);
           const tlen = c.getUint32(0, true);
           const target = new TextDecoder().decode(f.payload.subarray(4, 4 + tlen));
-          shared.request = target;
-          shared.lastResult = null;
-          const deadline = Date.now() + 120000;
-          while (Date.now() < deadline) {
-            await new Promise((r) => setTimeout(r, 25));
-            if (shared.lastResult) break;
+          const attempt = outbound.tryReserve(target);
+          if (!attempt.ok) {
+            await t.write(frame(FT.CTL_ERR, new Writer().str(attempt.error).out()));
+            sock.end();
+            return;
           }
-          const msg = shared.lastResult ?? "timeout";
+          shared.lastResult = null;
+          let timeout;
+          const timeoutResult = new Promise((resolve) => {
+            timeout = setTimeout(() => resolve("timeout"), 120000);
+          });
+          const msg = await Promise.race([attempt.request.result, timeoutResult]);
+          clearTimeout(timeout);
           const ok = msg.startsWith("migrated") || msg.startsWith("done");
           await t.write(frame(ok ? FT.CTL_OK : FT.CTL_ERR, new Writer().str(msg).out()));
           sock.end();
-        } else if (first[0] === FT.CTL_STATUS) {
+      } else if (first === FT.CTL_STATUS) {
           await readFrame(t);
-          const msg = shared.lastResult ?? (busy ? "running" : "idle");
+          const msg = shared.lastResult ?? admission.status();
           await t.write(frame(FT.CTL_OK, new Writer().str(msg).out()));
           sock.end();
-        } else {
-          sock.end();
-        }
-      } catch (e) {
-        console.error(`weave: connection error: ${e.message}`);
-        try { sock.end(); } catch {}
+      } else {
+        sock.end();
       }
-    });
+    } catch (e) {
+      if (incomingReservation !== null) admission.release(incomingReservation);
+      console.error(`weave: connection error: ${e.message}`);
+      // A receive timeout leaves readExact pending; fully destroy the socket
+      // so the stalled peer cannot retain this connection or admission slot.
+      try { sock.destroy(); } catch {}
+    }
   });
 
   server.listen(port, host, () => {

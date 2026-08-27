@@ -1,0 +1,73 @@
+name: Set up Weave CI toolchains
+description: Read centralized pins and install only the requested language toolchains
+inputs:
+  rust:
+    description: Install the pinned Rust toolchain and Cargo dependency cache
+    required: false
+    default: "false"
+  node:
+    description: Install the pinned Node.js toolchain
+    required: false
+    default: "false"
+  go:
+    description: Install the pinned Go toolchain
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Read centralized versions
+      id: versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        source .github/ci/versions.env
+        {
+          echo "rust=$RUST_VERSION"
+          echo "node=$NODE_VERSION"
+          echo "go=$GO_VERSION"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Install Rust
+      if: inputs.rust == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup toolchain install "${{ steps.versions.outputs.rust }}" \
+          --profile minimal --component rustfmt,clippy
+        rustup default "${{ steps.versions.outputs.rust }}"
+
+    - name: Keep CI build output outside the checkout
+      if: inputs.rust == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cargo_target="$RUNNER_TEMP/weave-ci/cargo-target"
+        mkdir -p "$cargo_target"
+        printf 'CARGO_TARGET_DIR=%s\n' "$cargo_target" >> "$GITHUB_ENV"
+
+    - name: Cache Cargo downloads
+      if: inputs.rust == 'true'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'wamr/Cargo.lock', 'guests/mandel/Cargo.lock') }}
+        restore-keys: |
+          cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install Node.js
+      if: inputs.node == 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.versions.outputs.node }}
+
+    - name: Install Go
+      if: inputs.go == 'true'
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ steps.versions.outputs.go }}
+        cache: true
+        cache-dependency-path: go/weave-wazero/go.sum

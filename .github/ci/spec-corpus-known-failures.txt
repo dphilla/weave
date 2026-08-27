@@ -1,0 +1,7 @@
+# wast-stem|module (* or exact filename)|stderr extended regex|tracked baseline reason
+table_copy64|*|type mismatch: expected i32, found i64|table64 must be rejected before transformation
+table_copy_mixed|*|type mismatch: expected i32, found i64|mixed table32/table64 must be rejected before transformation
+table_init64|*|type mismatch: expected i32, found i64|table64 must be rejected before transformation
+throw|*|unknown tag [0-9]+: tag index out of bounds|exception tags must be rejected before transformation
+try_table|*|unknown tag [0-9]+: tag index out of bounds|exception tags must be rejected before transformation
+extern|commands.0.wasm|input module failed validation: constant expression required: non-constant operator: visit_extern_convert_any|new GC constant expression must be rejected as unsupported before validation

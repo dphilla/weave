@@ -12,6 +12,9 @@
   (func (export "run") (param $n i32) (result i32)
     (local $i i32)
     (i32.store8 $secondary (i32.const 0) (i32.const 0))
+    ;; Synchronization event: CI migrates only after observing that the
+    ;; active-segment byte has been cleared on the source.
+    (call $emit32 (i32.load8_u $secondary (i32.const 0)))
     (loop $work
       (i32.store $scratch
         (i32.and (i32.mul (local.get $i) (i32.const 4)) (i32.const 65532))
@@ -20,4 +23,3 @@
       (br_if $work (i32.lt_u (local.get $i) (local.get $n))))
     (call $emit32 (local.get $i))
     (i32.add (local.get $i) (i32.load8_u $secondary (i32.const 0)))))
-

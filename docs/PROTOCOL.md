@@ -2,9 +2,10 @@
 
 A migration uses one ordered byte stream dialed by the **source** toward the
 **target**. Native nodes use TCP directly. Chrome carries the identical bytes
-inside binary WebSocket messages through the demo's WebSocket↔TCP relay. The
-same framing carries the tiny native control API used by
-`weave migrate/status`.
+either inside binary WebSocket messages through the demo's WebSocket↔TCP relay
+or directly to another browser over a reliable ordered RTCDataChannel. The
+same framing carries the tiny native TCP control API used by `weave
+migrate/status`.
 
 Framing: `[type: u8][len: u32 LE][payload: len bytes]`. Strings are
 `u32 LE length + UTF-8`. Max frame 64 MiB.
@@ -105,15 +106,18 @@ Service restore runs only on newly created, non-executing target service
 objects. A `HostService` restore implementation must stage internal state
 without externally visible effects; publishing ownership of a socket, lease,
 or other external resource belongs after COMMIT and requires an
-application-defined fencing scheme. Service names and ordering must match
-exactly before PREPARED.
+application-defined fencing scheme. The current interface has only a stable
+name, `snapshot()`, and `restore()`; version negotiation, activation/abort
+hooks, and a generic fence are future plugin-contract work. Service names and
+ordering must match exactly before PREPARED.
 
 ## Transports
 
 The JS core (`js/weave.mjs`) is transport-agnostic. It needs
 `{ readExact(n) -> Promise<Uint8Array>, write(bytes) -> Promise }`;
 `weave-node.mjs` supplies TCP and `weave-browser.mjs` supplies a bounded,
-backpressured WebSocket byte stream:
+backpressured WebSocket byte stream plus a reliable ordered RTCDataChannel
+adapter:
 
 ```js
 import { acceptRelay, connectRelay } from "./weave-browser.mjs";
@@ -122,16 +126,38 @@ const sourceStream = await connectRelay(relayUrl, "wamr");
 const targetStream = await acceptRelay(relayUrl);
 ```
 
+RTCDataChannel is message-oriented, so the adapter discards its message
+boundaries, coalesces reads, and fragments logical writes into at most 16 KiB
+messages, further clamped to the negotiated SCTP maximum. It rejects unordered
+and partially reliable channels, bounds unread input, and propagates
+`bufferedAmount` backpressure. The channel subprotocol is `weave.v2`;
+WebRTC's SCTP/DTLS/ICE layers are transport beneath the Weave frame protocol,
+not new Weave frame types.
+
 The root [`demos/browser-wamr`](../demos/browser-wamr/) relay implements both
 directions: `/v1/connect/:alias` dials an allowlisted native target, while
 `/v1/accept` reserves a browser target and pairs it with the next connection
 to a dedicated TCP ingress port. That prefix versions the relay HTTP API, not
 the carried Weave v2 stream. Chrome cannot listen on or dial raw TCP.
 
-Protocol v2 does not authenticate or encrypt its native transport. The demo
-pins tokenless origins to its configured loopback listener, restricts outbound
-targets to aliases, and supports an access token; use `wss://`, explicit
-origins, and a firewall/authenticated native ingress in production.
+The [`browser-webrtc`](../demos/browser-webrtc/) demo keeps WebRTC signaling
+separate. Its bounded HTTP service exchanges opaque SDP offer/answer and ICE
+candidate JSON with idempotent POST request IDs; migration frames flow only
+over the established DataChannel. Its target allowlists the served demo
+module through `acceptMigration`'s offer-admission hook. Host candidates are
+sufficient for the local demo. Cross-network deployments normally add STUN
+discovery and a TURN fallback; a TURN-selected path relays all migration bytes
+and should be budgeted accordingly.
+
+Protocol v2 does not authenticate or encrypt its native TCP transport. WebRTC
+DataChannels are DTLS-protected, but HTTPS and signaling access control only
+authenticate the signaling service and protect against on-path attackers. A
+malicious signaling service can still substitute connection descriptions and
+fingerprints unless peer identity is independently bound. The demos default
+to loopback listeners and use bearer/origin checks where they can be exposed;
+use an explicit public-origin/reverse-proxy policy, per-peer authorization,
+narrow workload/target allowlists, quotas, and a firewall or authenticated
+native ingress in production.
 
 Targets enforce implementation policy before guest-memory allocation: the
 bundled hosts cap a received module, inspect its declared initial memories

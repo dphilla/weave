@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Weave · Browser ↔ Browser over WebRTC</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <p class="eyebrow">Peer-to-peer live migration</p>
+        <h1>Browser <span aria-hidden="true">↔</span> Browser</h1>
+        <p class="lede">
+          Two tabs exchange Weave v2 directly over a reliable WebRTC data
+          channel. The Node service carries only offer, answer, and ICE
+          signaling; it never relays migration bytes.
+        </p>
+      </header>
+
+      <section class="path" aria-label="Migration path">
+        <div><span class="dot peer-a"></span><strong>Peer A</strong><small>WebAssembly API</small></div>
+        <div class="wire"><span>Weave v2</span><i></i></div>
+        <div><span class="dot rtc"></span><strong>WebRTC</strong><small>SCTP · DTLS · ICE</small></div>
+        <div class="wire"><span>direct or TURN</span><i></i></div>
+        <div><span class="dot peer-b"></span><strong>Peer B</strong><small>WebAssembly API</small></div>
+      </section>
+
+      <section class="panel session">
+        <div class="section-heading">
+          <div>
+            <p class="step">Session</p>
+            <h2 id="peer-role">Peer</h2>
+          </div>
+          <span id="connection-state" class="badge muted">starting</span>
+        </div>
+        <div class="session-grid">
+          <div>
+            <span class="field-label">Private room ID</span>
+            <code id="room-name"></code>
+          </div>
+          <div class="links">
+            <a id="peer-a-url" target="_blank" rel="noreferrer">Open peer A</a>
+            <a id="peer-b-url" target="_blank" rel="noreferrer">Open peer B</a>
+            <button id="copy-other" class="ghost" type="button">Copy other peer link</button>
+          </div>
+        </div>
+        <p class="hint">
+          Open each role exactly once. Room and token stay out of the initial
+          page request and Referer; the app then uses them for signaling and
+          Authorization headers.
+        </p>
+      </section>
+
+      <div class="workspace">
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="step">Workload</p>
+              <h2>Woven counter</h2>
+            </div>
+            <span id="module-state" class="badge muted">loading module</span>
+          </div>
+          <p id="module-detail" class="hint">Loading the generated counter…</p>
+          <div class="fields two">
+            <label>
+              Entry
+              <select id="entry" disabled></select>
+            </label>
+            <label>
+              Iterations
+              <input id="entry-args" value="1000000000" inputmode="numeric" spellcheck="false">
+            </label>
+          </div>
+          <button id="start-workload" class="primary" type="button" disabled>Start in peer A</button>
+          <p class="hint">Only peer A starts a new workload. After that, ownership can move once in each direction.</p>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="step">Ownership</p>
+              <h2>Migration controls</h2>
+            </div>
+            <span id="runtime-state" class="badge idle">idle</span>
+          </div>
+          <div class="direction-card">
+            <div>
+              <strong>Move the live instance</strong>
+              <p>The peer is armed over a control channel before Weave sends state.</p>
+            </div>
+            <button id="migrate-workload" class="primary" type="button" disabled>Migrate to other peer</button>
+          </div>
+          <dl class="metrics four">
+            <div><dt>Owner</dt><dd id="metric-owner">none</dd></div>
+            <div><dt>Polls</dt><dd id="metric-polls">0</dd></div>
+            <div><dt>Pages</dt><dd id="metric-pages">0</dd></div>
+            <div><dt>ICE path</dt><dd id="metric-path">not selected</dd></div>
+          </dl>
+        </section>
+      </div>
+
+      <section class="panel console-panel">
+        <div class="section-heading">
+          <div>
+            <p class="step">Trace</p>
+            <h2>Peer-local event log</h2>
+          </div>
+          <button id="clear-log" class="ghost" type="button">Clear</button>
+        </div>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+
+      <footer>
+        Local mode uses host ICE candidates only. Internet use needs authenticated
+        HTTPS signaling plus STUN and a TURN fallback; TURN relays the state bytes.
+      </footer>
+    </main>
+    <script type="module" src="/app.mjs"></script>
+  </body>
+</html>

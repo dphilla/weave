@@ -27,6 +27,8 @@ WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/multi-memory" \
   .github/ci/wamr-fixture.sh --skip-build
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/browser" \
   .github/ci/browser-smoke.sh
+WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/browser-peer" \
+  .github/ci/browser-peer-smoke.sh
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/adversity" \
   .github/ci/adversity.sh all
 .github/ci/host-service-baseline.sh 2>&1 | tee "$ARTIFACT_ROOT/host-service-baseline.log"

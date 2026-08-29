@@ -6,11 +6,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+NODE_BIN="${NODE_BIN:-node}"
 
 cargo test --locked --release -p weave-wasmtime --test root_audit_service_mismatch -- --nocapture
 cargo test --locked --release -p weave-host --test protocol_security \
   target_rejects_unknown_service_blob_before_any_restore -- --exact --nocapture
-node --test js/weave.test.mjs
+"$NODE_BIN" --test js/weave.test.mjs
 (
   cd go/weave-wazero
   go test -mod=readonly -count=1 ./...

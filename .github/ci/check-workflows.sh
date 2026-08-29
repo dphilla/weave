@@ -11,6 +11,16 @@ source "$ROOT/.github/ci/versions.env"
 cd "$ROOT"
 
 bash -n .github/ci/*.sh
+bash -n demos/*/*.sh
+[[ -x demos/server-chain/run.sh ]] || {
+  printf '%s\n' 'demos/server-chain/run.sh must be executable' >&2
+  exit 1
+}
+server_chain_list="$(demos/server-chain/run.sh --list)"
+[[ "$server_chain_list" == 'route wasmtime:node:wazero' ]] || {
+  printf 'unexpected server-chain route:\n%s\n' "$server_chain_list" >&2
+  exit 1
+}
 
 pin_failures=0
 while IFS= read -r use_line; do

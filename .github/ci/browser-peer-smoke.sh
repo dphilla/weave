@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
-# Build prerequisites and run the required real Chrome <-> WAMR smoke test.
+# Build the fixture and require a real Chrome A -> B -> A WebRTC migration.
+# Browser/network test setup belongs here; the demo itself has no CI branches.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-[[ -n "${WAMR_ROOT:-}" ]] || {
-  printf '%s\n' 'WAMR_ROOT must point to the verified WAMR checkout' >&2
-  exit 1
-}
 NODE_BIN="${NODE_BIN:-node}"
 command -v "$NODE_BIN" >/dev/null 2>&1 || { printf 'Node.js is required: %s\n' "$NODE_BIN" >&2; exit 1; }
 
 find_chrome() {
   local candidate resolved
   local -a candidates=()
-  if [[ -n "${CHROME_BIN:-}" ]]; then
-    candidates+=("$CHROME_BIN")
-  fi
+  [[ -z "${CHROME_BIN:-}" ]] || candidates+=("$CHROME_BIN")
   case "$(uname -s)" in
     Darwin)
       candidates+=(
@@ -26,9 +21,7 @@ find_chrome() {
         '/Applications/Chromium.app/Contents/MacOS/Chromium'
       )
       ;;
-    *)
-      candidates+=(/usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/chromium /usr/bin/chromium-browser)
-      ;;
+    *) candidates+=(/usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/chromium /usr/bin/chromium-browser) ;;
   esac
   candidates+=(google-chrome google-chrome-stable chromium chromium-browser)
   for candidate in "${candidates[@]}"; do
@@ -44,15 +37,13 @@ CHROME_BIN="$(find_chrome)" || {
   exit 1
 }
 
-ARTIFACT_DIR="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-browser-smoke.XXXXXX")}"
+ARTIFACT_DIR="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-browser-peer.XXXXXX")}"
 ROOT_CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
-WAMR_CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/wamr/target}"
 mkdir -p "$ARTIFACT_DIR"
-printf 'browser smoke artifacts: %s\n' "$ARTIFACT_DIR"
 WOVEN="$ARTIFACT_DIR/counter.woven.wasm"
+printf 'browser peer smoke artifacts: %s\n' "$ARTIFACT_DIR"
 
 cargo build --locked --release -p weave-cli
-WAMR_ROOT="$WAMR_ROOT" cargo build --locked --release --manifest-path wamr/Cargo.toml
 "$ROOT_CARGO_TARGET/release/weave" transform guests/counter.wat -o "$WOVEN" --period 256
 
 {
@@ -60,11 +51,12 @@ WAMR_ROOT="$WAMR_ROOT" cargo build --locked --release --manifest-path wamr/Cargo
   "$NODE_BIN" --version
   printf 'chrome_bin=%s\n' "$CHROME_BIN"
   "$CHROME_BIN" --version
-  git -C "$WAMR_ROOT" rev-parse HEAD
+  rustc --version
+  cargo --version
 } > "$ARTIFACT_DIR/versions.txt"
 
 WEAVE_SMOKE_REQUIRED=1 \
 CHROME_BIN="$CHROME_BIN" \
-WAMR_BIN="${WEAVE_WAMR_BIN:-$WAMR_CARGO_TARGET/release/weave-wamr}" \
 WEAVE_DEMO_WASM="$WOVEN" \
-"$NODE_BIN" demos/browser-wamr/e2e-smoke.mjs --require 2>&1 | tee "$ARTIFACT_DIR/browser-smoke.log"
+"$NODE_BIN" demos/browser-webrtc/e2e-smoke.mjs \
+  --require --artifacts "$ARTIFACT_DIR" 2>&1 | tee "$ARTIFACT_DIR/browser-peer-smoke.log"

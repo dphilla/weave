@@ -91,7 +91,11 @@ readonly -a WAMR_EDGES=(
   'node:wamr'     'wamr:node'
   'wazero:wamr'   'wamr:wazero'
 )
-readonly -a PR_ROUTES=('wasmtime:node:wasmtime')
+readonly -a NATIVE_ROUTES=('wasmtime:node:wazero')
+readonly -a PR_ROUTES=(
+  'wasmtime:node:wasmtime'
+  "${NATIVE_ROUTES[@]}"
+)
 
 declare -a edges=()
 declare -a routes=()
@@ -109,9 +113,9 @@ if ((${#explicit_edges[@]} + ${#explicit_routes[@]})); then
 else
   case "$suite" in
     pr) edges=("${PR_EDGES[@]}"); edge_count=${#PR_EDGES[@]}; routes=("${PR_ROUTES[@]}"); route_count=${#PR_ROUTES[@]} ;;
-    native) edges=("${NATIVE_EDGES[@]}"); edge_count=${#NATIVE_EDGES[@]} ;;
+    native) edges=("${NATIVE_EDGES[@]}"); edge_count=${#NATIVE_EDGES[@]}; routes=("${NATIVE_ROUTES[@]}"); route_count=${#NATIVE_ROUTES[@]} ;;
     wamr) edges=("${WAMR_EDGES[@]}"); edge_count=${#WAMR_EDGES[@]} ;;
-    all) edges=("${NATIVE_EDGES[@]}" "${WAMR_EDGES[@]}"); edge_count=$(( ${#NATIVE_EDGES[@]} + ${#WAMR_EDGES[@]} )) ;;
+    all) edges=("${NATIVE_EDGES[@]}" "${WAMR_EDGES[@]}"); edge_count=$(( ${#NATIVE_EDGES[@]} + ${#WAMR_EDGES[@]} )); routes=("${NATIVE_ROUTES[@]}"); route_count=${#NATIVE_ROUTES[@]} ;;
     *) printf 'unknown suite: %s\n' "$suite" >&2; usage >&2; exit 2 ;;
   esac
 fi

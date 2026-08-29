@@ -104,7 +104,7 @@ jobs:
           retention-days: 30
 
   browser:
-    name: Required Chrome and WAMR round trip
+    name: Required Chrome migration round trips
     needs: language-gates
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -124,6 +124,10 @@ jobs:
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/browser
         run: .github/ci/browser-smoke.sh
+      - name: Run browser-to-browser WebRTC smoke
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/browser/peer
+        run: .github/ci/browser-peer-smoke.sh
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

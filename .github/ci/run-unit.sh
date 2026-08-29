@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+NODE_BIN="${NODE_BIN:-node}"
 
 usage() {
   cat <<'EOF'
@@ -33,7 +34,7 @@ run_rust_quality() {
 }
 
 run_js() {
-  node --test js/*.test.mjs demos/browser-wamr/*.test.mjs
+  "$NODE_BIN" --test js/*.test.mjs demos/*/*.test.mjs
 }
 
 run_go() {

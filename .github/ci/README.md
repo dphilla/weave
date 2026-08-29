@@ -29,6 +29,7 @@ Cargo behavior unless the caller sets that variable too.
 | `prepare-wasm-tools.sh` | Platform-select and checksum the pinned official corpus tool |
 | `run-wamr.sh` | Independent WAMR workspace build and tests |
 | `browser-smoke.sh` | Required Chrome → WAMR → Chrome → WAMR smoke |
+| `browser-peer-smoke.sh` | Required Chrome A → B → A WebRTC smoke with local signaling/STUN |
 | `wamr-fixture.sh` | Multiple-memory Wasmtime → WAMR → Wasmtime chain |
 | `adversity.sh` | Protocol failure tests and repeated migration thresholds |
 | `host-service-baseline.sh` | Current built-in host-service behavior tests |
@@ -57,7 +58,7 @@ From the repository root:
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-edge \
   .github/ci/conformance.sh --edge wasmtime:wasmtime
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
-  .github/ci/conformance.sh --route wasmtime:node:wasmtime
+  .github/ci/conformance.sh --route wasmtime:node:wazero
 
 # Unique non-WAMR product scenarios retained from the original E2E harness.
 .github/ci/checkpoint-file.sh
@@ -89,12 +90,16 @@ The browser lane additionally requires Node 22 or newer and Chrome/Chromium:
 ```sh
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-artifacts \
   .github/ci/browser-smoke.sh
+WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-peer-artifacts \
+  .github/ci/browser-peer-smoke.sh
 ```
 
 Missing browser prerequisites are failures in this wrapper. The underlying
 interactive demo retains its developer-friendly optional skip behavior.
 Set `CHROME_BIN` when Chrome/Chromium is outside the usual system locations;
-the resolved executable and version are recorded in `versions.txt`.
+the resolved executable and version are recorded in `versions.txt`. Central
+scripts that invoke Node honor `NODE_BIN=/absolute/path/to/node`, which is
+useful when a version manager does not put Node on the non-interactive PATH.
 
 ## Conformance suites
 
@@ -104,10 +109,10 @@ event stream, then compares every selected route's complete `EMIT*` and
 
 | Suite | Cases |
 |---|---|
-| `pr` | Wasmtime→Wasmtime, Wasmtime→Node, Node→wazero, wazero→Wasmtime, and Wasmtime→Node→Wasmtime |
-| `native` | All 9 directed pairs, self-pairs included, among Wasmtime, Node, and wazero |
+| `pr` | Wasmtime→Wasmtime, Wasmtime→Node, Node→wazero, wazero→Wasmtime, Wasmtime→Node→Wasmtime, and the demo's Wasmtime→Node→wazero route |
+| `native` | All 9 directed pairs, self-pairs included, among Wasmtime, Node, and wazero, plus Wasmtime→Node→wazero |
 | `wamr` | WAMR→WAMR plus both directions between WAMR and each native adapter: 7 cases |
-| `all` | `native` + `wamr`: all 16 directed pairs among the four native runtimes |
+| `all` | `native` + `wamr`: all 16 directed pairs among the four native runtimes, plus Wasmtime→Node→wazero |
 
 Migration is requested after the source log reaches a deterministic minimum
 event count, not after a timing guess. The source continues while the request
@@ -132,7 +137,8 @@ The PR-required lanes are:
 - Root Rust tests and release build.
 - JavaScript core, transport, relay, and browser-smoke unit tests.
 - Go format, vet, tests, and a non-source-tree build.
-- The five-case representative migration suite.
+- The six-case representative migration suite, including the advertised
+  three-runtime server demo route.
 - Checkpoint-file restore in a fresh process.
 - Shell/workflow static validation.
 
@@ -146,6 +152,16 @@ CI currently qualifies the exact current Node and Go pins in `versions.env`.
 The relay's documented Node 18 floor and the Go module's 1.22 language floor
 are not yet protected by minimum-version jobs; add a scheduled compatibility
 matrix before treating those floors as continuously qualified.
+
+Real browser-to-browser WebRTC is required on main, nightly, and release
+qualification. The smoke starts an in-process signaling service and a minimal
+loopback STUN binding responder, launches two actual Chrome pages, migrates in
+both directions, and checks the exact next `EMIT` index at each boundary. Its
+artifact contains both page logs and screenshots plus Chrome/tool versions.
+This validates a real same-host DataChannel and exercises local STUN candidate
+gathering; it does not assert that a server-reflexive candidate was selected.
+Separate browsers/network namespaces and forced TURN/UDP and TURN/TCP/TLS
+remain a future scheduled deployment matrix.
 
 ## Host-service baseline, not a plugin ABI
 

@@ -7,6 +7,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+NODE_BIN="${NODE_BIN:-node}"
 
 usage() {
   cat <<'EOF'
@@ -22,7 +23,7 @@ run_protocol() {
   RUST_BACKTRACE=1 cargo test --locked --release -p weave-host --test protocol_security -- --nocapture
   RUST_BACKTRACE=1 cargo test --locked --release -p weave-wasmtime \
     --test live_migration --test root_audit_service_mismatch -- --nocapture
-  node --test js/*.test.mjs demos/browser-wamr/*.test.mjs
+  "$NODE_BIN" --test js/*.test.mjs demos/*/*.test.mjs
   (
     cd go/weave-wazero
     go test -mod=readonly -count=1 ./...

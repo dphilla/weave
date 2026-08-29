@@ -10,8 +10,8 @@ contains only triggers, permissions, job ordering, and artifact upload wiring.
 | Tier | Trigger | Purpose | Workflow |
 |---|---|---|---|
 | Pull request | PRs to `main`, manual dispatch | Language gates, checkpoint-file restore, and a representative directed migration cycle plus chain | `pr.yml` |
-| Main conformance | Every push to `main`, manual dispatch | Language gates, all 16 directed Wasmtime/Node/wazero/WAMR pairs, Rust/LLVM guest, and required real Chrome | `conformance.yml` |
-| Nightly adversity | Daily, manual dispatch | Protocol failure-path tests, repeated workload-progress thresholds, WAMR multi-memory, browser, and host-service baseline | `nightly.yml` |
+| Main conformance | Every push to `main`, manual dispatch | Language gates, all 16 directed Wasmtime/Node/wazero/WAMR pairs, Rust/LLVM guest, Chrome↔WAMR, and browser↔browser WebRTC | `conformance.yml` |
+| Nightly adversity | Daily, manual dispatch | Protocol failure-path tests, repeated workload-progress thresholds, WAMR multi-memory, both real-browser routes, and host-service baseline | `nightly.yml` |
 | Corpus | Weekly, manual dispatch | Transform and validate valid modules extracted from the official core Wasm testsuite | `weekly-corpus.yml` |
 | Qualification | `v*` tags, manual dispatch | Deterministic non-publishing runtime qualification with long artifact retention | `qualification.yml` |
 
@@ -19,7 +19,8 @@ The qualification workflow never publishes a release and has only
 `contents: read` permission. A tag indicates a candidate to test, not proof
 that it passed; release publication should wait for this workflow's result.
 It composes units, workflow validation, checkpoint restore, the Rust guest,
-all runtime directions, WAMR/Chrome, host-service baseline, and adversity.
+all runtime directions, WAMR/Chrome, browser/WebRTC, host-service baseline,
+and adversity.
 It intentionally excludes the floating upstream corpus and the two known-red
 advisory lanes (Rust quality and Go race); inspect their separate recent runs.
 
@@ -36,6 +37,12 @@ The scheduled tiers answer slower questions about protocol failure paths,
 interpreter/browser integration, upstream Wasm evolution, and host-service
 state.
 
+The representative PR route set also includes the exact
+Wasmtime→Node→wazero chain documented in `demos/server-chain`. The real
+browser-peer smoke starts on main/nightly rather than the PR merge path; its
+signaling tests and DataChannel byte-stream tests are still part of the PR
+JavaScript unit lane.
+
 This mirrors established systems practice: compiler projects use fast common
 builders plus specialist buildbots, browser projects share one conformance
 harness across engines, and VM migration implementations test state-machine
@@ -50,6 +57,10 @@ peers must advertise the same service set, and the service blobs participate in
 the final state hash. A socket, lease, DOM object, GPU handle, or similar
 external resource still needs an application-defined ownership fence that is
 activated only after protocol `COMMIT`.
+
+That fence is a requirement, not a feature already exposed by `HostService`.
+Today there is no version negotiation, activate/abort callback, or generic
+fencing API; service versioning can only be encoded by naming convention.
 
 The nightly `host-service-baseline.sh` lane is the first CI home for that idea.
 It groups the existing Rust, JavaScript, and Go checks for canonical service
@@ -75,6 +86,12 @@ on failure. Retention is 7 days for PRs, 30 days for main/nightly/corpus, and
 - Per-hop stdout/stderr and every control-client response.
 - Concatenated host-visible stream and diff on divergence.
 
+The browser-peer artifact adds both tab logs/screenshots, selected ICE-path
+diagnostics, and an exact boundary-continuity result. CI supplies only a local
+STUN binding responder for deterministic loopback candidates. A separate
+forced-TURN matrix is still needed before claiming continuous qualification
+through restrictive enterprise/mobile networks.
+
 The manifest values map directly back to local environment variables and
 `conformance.sh --edge/--route`, making a failing job reproducible without
 copying workflow YAML.
@@ -86,8 +103,8 @@ copying workflow YAML.
 2. Make the Rust, JavaScript, Go, and representative conformance jobs branch
    protection requirements. Leave the named Rust-quality job advisory until
    its inherited baseline is repaired.
-3. Let `Main conformance` pass at least once before treating README runtime
-   claims as CI-qualified.
+3. Let `Main conformance`, including both real-browser routes, pass at least
+   once before treating README runtime claims as CI-qualified.
 4. Observe several scheduled runs, then decide whether advisory Go race can
    become required and whether timeouts/iteration counts need tuning.
 5. Repair formatting/Clippy findings and promote that existing job to a PR

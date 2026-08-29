@@ -536,6 +536,24 @@ test("target rejects forged control/layout metadata before PREPARED", async () =
   assert.ok(!transport.writes.some((bytes) => bytes[0] === FT.PREPARED));
 });
 
+test("target admission can reject an offered module before transfer", async () => {
+  const transport = new PushTransport();
+  let offer = null;
+  const module = minimalWovenModule();
+  const accepting = offerModuleForValidation(transport, module, {
+    authorizeOffer(value) {
+      offer = value;
+      return false;
+    },
+  });
+  await assert.rejects(accepting, /target policy rejected the module offer/);
+  assert.equal(offer.sourceRuntime, "test-source");
+  assert.equal(offer.moduleSize, module.wasm.length);
+  assert.equal(offer.moduleHashHex, Buffer.from(sha256(module.wasm)).toString("hex"));
+  assert.ok(transport.writes.some((bytes) => bytes[0] === FT.ABORT));
+  assert.ok(!transport.writes.some((bytes) => bytes[0] === FT.MODULE_NEED));
+});
+
 function offerFinalStateMigration(transport, {
   sourceServices = new Map(),
   makeTargetServices = () => new Map(),

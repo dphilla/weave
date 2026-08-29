@@ -1313,7 +1313,10 @@ export function rawMetaSection(wasm) {
 
 /**
  * Accept one migration over `transport`. `makeServices()` builds the service
- * map for the incoming instance. Returns a ready-to-resume WeaveInstance.
+ * map for the incoming instance. `opts.authorizeOffer`, when present, runs
+ * after bounded MODULE_META parsing and before cache lookup/module transfer;
+ * it must return true to admit the offered workload. Returns a ready-to-resume
+ * WeaveInstance.
  */
 async function rejectMigration(t, code, message, cause) {
   try {
@@ -1328,6 +1331,9 @@ async function rejectMigration(t, code, message, cause) {
 
 export async function acceptMigration(transport, makeServices, opts = {}) {
   const t = transport;
+  if (opts.authorizeOffer !== undefined && typeof opts.authorizeOffer !== "function") {
+    throw new TypeError("authorizeOffer must be a function");
+  }
   const targetReadTimeoutMs = opts.targetReadTimeoutMs ?? 120_000;
   const targetSessionTimeoutMs = opts.targetSessionTimeoutMs ?? 10 * 60_000;
   const commitAckWriteTimeoutMs = opts.commitAckWriteTimeoutMs ?? 10;
@@ -1378,8 +1384,9 @@ export async function acceptMigration(transport, makeServices, opts = {}) {
   const size64 = mc.u64();
   const metaBytes = mc.bytes(mc.u32()).slice();
   mc.done("MODULE_META");
+  let offeredMeta;
   try {
-    decodeMeta(metaBytes);
+    offeredMeta = decodeMeta(metaBytes);
   } catch (error) {
     await rejectMigration(t, 3, `invalid offered weave.meta: ${error}`, error);
   }
@@ -1391,6 +1398,27 @@ export async function acceptMigration(transport, makeServices, opts = {}) {
     await rejectMigration(t, 2, `module size ${size64} exceeds target limit ${maxModuleBytes}`);
   }
   const size = Number(size64);
+  if (opts.authorizeOffer) {
+    let decision;
+    try {
+      decision = await opts.authorizeOffer({
+        sourceRuntime,
+        moduleHash: moduleHash.slice(),
+        moduleHashHex: hex(moduleHash),
+        moduleSize: size,
+        meta: offeredMeta,
+        metaBytes: metaBytes.slice(),
+      });
+    } catch (error) {
+      await rejectMigration(t, 2, `module offer authorization failed: ${error}`, error);
+    }
+    if (decision !== true) {
+      const reason = typeof decision === "string" && decision
+        ? decision
+        : "target policy rejected the module offer";
+      await rejectMigration(t, 2, reason);
+    }
+  }
   const maxMemoryBytes = opts.maxMemoryBytes ?? 1024 * 1024 * 1024;
   if (!Number.isSafeInteger(maxMemoryBytes) || maxMemoryBytes < 0) {
     throw new Error("maxMemoryBytes must be a non-negative safe integer");

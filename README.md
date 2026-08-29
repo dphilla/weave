@@ -101,6 +101,7 @@ demos/                   runnable server-chain, browser-P2P, and Chrome↔WAMR e
 guests/                  test guests (WAT + Rust wasm32-unknown-unknown)
 docs/                    DESIGN.md, ABI.md, PROTOCOL.md
 scripts/e2e.sh           compatibility shim into the centralized native E2E
+scripts/cleanup.sh       safe allowlisted local artifact cleanup shim
 .github/ci/              centralized CI commands, pins, conformance, and setup
 .github/workflows/       thin PR/main/nightly/corpus/qualification orchestration
 ```

@@ -15,17 +15,19 @@ async function fixture() {
 
 async function withServer(options, run) {
   const files = await fixture();
-  const running = await startServer({
-    host: "127.0.0.1",
-    port: 0,
-    wasmPath: files.wasmPath,
-    pollTimeoutMs: 100,
-    ...options,
-  });
-  const base = `http://127.0.0.1:${running.address.port}`;
-  try { await run({ base, running, ...files }); }
-  finally {
-    await running.close();
+  let running = null;
+  try {
+    running = await startServer({
+      host: "127.0.0.1",
+      port: 0,
+      wasmPath: files.wasmPath,
+      pollTimeoutMs: 100,
+      ...options,
+    });
+    const base = `http://127.0.0.1:${running.address.port}`;
+    await run({ base, running, ...files });
+  } finally {
+    await running?.close();
     await fs.promises.rm(files.directory, { recursive: true, force: true });
   }
 }

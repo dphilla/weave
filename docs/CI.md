@@ -96,6 +96,29 @@ The manifest values map directly back to local environment variables and
 `conformance.sh --edge/--route`, making a failing job reproducible without
 copying workflow YAML.
 
+## Local cleanup and failure retention
+
+Central runners use one artifact lifecycle: a default temporary directory is
+deleted after success, retained after failure, and retained on any result when
+`WEAVE_CI_KEEP_TEMP=1` is set. A caller-provided `WEAVE_CI_ARTIFACT_DIR` is
+never removed. Process-owning harnesses separately shut down their exact child
+PIDs or process groups on normal exit, error, `SIGINT`, and `SIGTERM`.
+
+For manual recovery, preview the centralized allowlisted cleanup first:
+
+```sh
+scripts/cleanup.sh --dry-run
+scripts/cleanup.sh --dry-run --all
+```
+
+The default removes known demo output only. `--temp` adds owned direct
+children of `TMPDIR` matching exact Weave harness prefixes; `--builds` adds
+only the root and WAMR build trees. The command never runs a Git cleanup or
+restores tracked files, so implementation edits cannot be mistaken for test
+residue. See the
+[CI subsystem cleanup documentation](../.github/ci/README.md#local-cleanup) for
+the complete behavior and commands.
+
 ## Initial rollout
 
 1. Manually dispatch `Pull request` and confirm all required jobs and uploaded

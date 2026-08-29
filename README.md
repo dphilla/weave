@@ -1,6 +1,6 @@
 # Weave
 
-> AI Disclaimer: Worked on this/toyed with for years pre-ai; used AI-assistance starting in 2026; *not* vibecoded 🙂
+> AI Disclaimer: Worked on this/toyed with for years pre-ai; used AI-assistance starting in 2026; this project is *not* vibecoded
 
 **Live migration for portable WebAssembly workloads, across machines and
 across runtimes.** Weave moves a *currently executing* woven module — its

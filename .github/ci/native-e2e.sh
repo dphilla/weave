@@ -5,10 +5,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 
-ARTIFACT_ROOT="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-native-e2e.XXXXXX")}"
-mkdir -p "$ARTIFACT_ROOT"
+weave_ci_artifacts_init weave-native-e2e ARTIFACT_ROOT
 printf 'native E2E artifacts: %s\n' "$ARTIFACT_ROOT"
 
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/checkpoint" .github/ci/checkpoint-file.sh

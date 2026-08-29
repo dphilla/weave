@@ -6,6 +6,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 NODE_BIN="${NODE_BIN:-node}"
 
@@ -34,7 +36,8 @@ run_protocol() {
 }
 
 run_migration() {
-  local root_artifacts="${WEAVE_CI_ARTIFACT_DIR:-${TMPDIR:-/tmp}/weave-adversity}"
+  local root_artifacts
+  weave_ci_artifacts_init weave-adversity root_artifacts
   local cut
   for cut in 1 7 31; do
     WEAVE_CI_ARTIFACT_DIR="$root_artifacts/cut-$cut" \

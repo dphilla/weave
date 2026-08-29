@@ -19,6 +19,10 @@ Cargo behavior unless the caller sets that variable too.
 |---|---|
 | `versions.env` | Rust, Node, Go, wasm-tools, actionlint, WAMR source pins |
 | `setup/action.yml` | Shared GitHub Actions toolchain setup and download cache |
+| `artifact-lifecycle.sh` | Shared success/failure retention policy for default temporary artifacts |
+| `artifact-lifecycle.test.sh` | Isolated lifecycle cleanup and retention checks |
+| `cleanup.sh` | Allowlisted manual cleanup; never resets source or arbitrary ignored files |
+| `cleanup.test.sh` | Isolated containment, symlink, dry-run, and scope checks |
 | `run-unit.sh` | Root Rust, JavaScript, Go, and advisory Rust-quality lanes |
 | `with-timeout.sh` | Portable process-group timeout and forced cleanup |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
@@ -36,7 +40,7 @@ Cargo behavior unless the caller sets that variable too.
 | `spec-corpus.sh` | Weekly official WebAssembly testsuite transformer smoke |
 | `spec-corpus-known-failures.txt` | Narrow pattern-matched upstream corpus baseline debt |
 | `qualification.sh` | Deterministic, non-publishing runtime qualification composition |
-| `check-workflows.sh` | Shell syntax and pinned actionlint validation |
+| `check-workflows.sh` | Shell syntax, cleanup safety tests, and pinned actionlint validation |
 
 Each script supports `--help` where it has options. Scripts use argv arrays,
 finite waits, exact child PIDs, and caller-selected artifact directories. They
@@ -64,6 +68,47 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
 .github/ci/checkpoint-file.sh
 .github/ci/rust-guest.sh
 ```
+
+### Local cleanup
+
+The convenient entry point is the dependency-free source-tree shim; cleanup
+policy and implementation remain centralized in this directory:
+
+```sh
+# Preview or remove only known generated demo outputs.
+scripts/cleanup.sh --dry-run
+scripts/cleanup.sh
+
+# Also sweep owned, direct TMPDIR children with exact harness prefixes.
+scripts/cleanup.sh --temp
+
+# Also discard the root Cargo and independent WAMR build caches.
+scripts/cleanup.sh --builds
+
+# Preview every supported cleanup class.
+scripts/cleanup.sh --dry-run --all
+```
+
+The command deliberately never invokes `git clean`, `git restore`, or
+`git reset`; tracked edits and unrelated untracked/ignored files are outside
+its scope. `--temp` does not use a broad `weave-*` deletion: it accepts only
+explicit harness prefixes, direct children of the physical temporary root,
+owned by the current user, with no symlink components. `--builds` accepts only
+this checkout's `target/` and `wamr/target/` trees.
+
+Central runners that create their own temporary artifact directory remove it
+automatically after success and retain it after failure. Set
+`WEAVE_CI_KEEP_TEMP=1` to retain a successful default directory. A caller-set
+`WEAVE_CI_ARTIFACT_DIR` is always retained so workflow upload steps and local
+diagnostics remain reliable.
+
+Process shutdown remains event-driven: the conformance harness tracks exact
+child PIDs, the timeout helper owns a process group, and the browser harnesses
+close their Chrome/service children in `finally` and signal handlers. Cleanup
+does not use `pkill`, and the manual command does not guess which processes
+are safe to terminate. `SIGKILL` and machine loss cannot run an exit handler;
+after confirming no run remains active, use `scripts/cleanup.sh --temp` to
+remove its allowlisted filesystem residue.
 
 Rust protocol tests and every conformance command bind loopback TCP ports.
 They therefore need an environment that permits localhost listeners.
@@ -126,7 +171,10 @@ the exact case manifest live beneath `WEAVE_CI_ARTIFACT_DIR`.
 
 Caller-supplied artifact directories are always retained. With no directory,
 a successful local run removes its temporary directory, a failed run retains
-it, and `WEAVE_CI_KEEP_TEMP=1` retains either. `--skip-build` requires the
+it, and `WEAVE_CI_KEEP_TEMP=1` retains either. Most central commands share
+this policy through `artifact-lifecycle.sh`; conformance keeps an integrated
+artifact/process trap because it also owns exact child PIDs. `--skip-build`
+requires the
 default release binaries to exist (or `WEAVE_BIN`, `WEAVE_WAZERO_BIN`, and
 `WEAVE_WAMR_BIN` to name them explicitly).
 

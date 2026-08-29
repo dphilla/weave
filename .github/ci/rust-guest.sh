@@ -7,14 +7,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/.github/ci/versions.env"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 
-ARTIFACT_DIR="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-rust-guest.XXXXXX")}"
+weave_ci_artifacts_init weave-rust-guest ARTIFACT_DIR
 TIMEOUT_SECONDS="${WEAVE_CI_TIMEOUT_SECONDS:-300}"
 FRAMES="${WEAVE_CI_MANDEL_FRAMES:-12}"
 BUILD_DIR="$ARTIFACT_DIR/build"
 GUEST="$BUILD_DIR/wasm32-unknown-unknown/release/mandel.wasm"
-mkdir -p "$ARTIFACT_DIR"
 printf 'Rust guest artifacts: %s\n' "$ARTIFACT_DIR"
 
 [[ "$(rustc --version)" == "rustc $RUST_VERSION "* ]] || {

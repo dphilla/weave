@@ -5,15 +5,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 
-ARTIFACT_DIR="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-checkpoint.XXXXXX")}"
+weave_ci_artifacts_init weave-checkpoint ARTIFACT_DIR
 TIMEOUT_SECONDS="${WEAVE_CI_TIMEOUT_SECONDS:-180}"
 ITERATIONS="${WEAVE_CI_CHECKPOINT_ITERATIONS:-3000000}"
 TIMEOUT_RUN="$ROOT/.github/ci/with-timeout.sh"
 ROOT_CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 WEAVE_BIN="${WEAVE_BIN:-$ROOT_CARGO_TARGET/release/weave}"
-mkdir -p "$ARTIFACT_DIR"
 printf 'checkpoint artifacts: %s\n' "$ARTIFACT_DIR"
 
 "$TIMEOUT_RUN" "$TIMEOUT_SECONDS" cargo build --locked --release -p weave-cli

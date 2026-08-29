@@ -5,6 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 
 NODE_BIN="${NODE_BIN:-node}"
@@ -37,9 +39,8 @@ CHROME_BIN="$(find_chrome)" || {
   exit 1
 }
 
-ARTIFACT_DIR="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-browser-peer.XXXXXX")}"
+weave_ci_artifacts_init weave-browser-peer ARTIFACT_DIR
 ROOT_CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
-mkdir -p "$ARTIFACT_DIR"
 WOVEN="$ARTIFACT_DIR/counter.woven.wasm"
 printf 'browser peer smoke artifacts: %s\n' "$ARTIFACT_DIR"
 

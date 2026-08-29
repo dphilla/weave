@@ -12,10 +12,19 @@ cd "$ROOT"
 
 bash -n .github/ci/*.sh
 bash -n demos/*/*.sh
+bash -n scripts/*.sh
 [[ -x demos/server-chain/run.sh ]] || {
   printf '%s\n' 'demos/server-chain/run.sh must be executable' >&2
   exit 1
 }
+[[ -x scripts/cleanup.sh ]] || {
+  printf '%s\n' 'scripts/cleanup.sh must be executable' >&2
+  exit 1
+}
+
+.github/ci/artifact-lifecycle.test.sh
+.github/ci/cleanup.test.sh
+
 server_chain_list="$(demos/server-chain/run.sh --list)"
 [[ "$server_chain_list" == 'route wasmtime:node:wazero' ]] || {
   printf 'unexpected server-chain route:\n%s\n' "$server_chain_list" >&2

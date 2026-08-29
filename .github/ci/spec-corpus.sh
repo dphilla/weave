@@ -9,6 +9,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/.github/ci/versions.env"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 
 usage() {
@@ -30,7 +32,7 @@ EOF
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 [[ $# -le 1 ]] || { usage >&2; exit 2; }
 
-ARTIFACT_DIR="${WEAVE_CI_ARTIFACT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/weave-spec-corpus.XXXXXX")}"
+weave_ci_artifacts_init weave-spec-corpus ARTIFACT_DIR
 mkdir -p "$ARTIFACT_DIR/cases" "$ARTIFACT_DIR/tools"
 printf 'spec corpus artifacts: %s\n' "$ARTIFACT_DIR"
 

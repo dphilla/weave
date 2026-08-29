@@ -5,11 +5,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/artifact-lifecycle.sh"
 cd "$ROOT"
 
 [[ -n "${WAMR_ROOT:-}" ]] || { printf '%s\n' 'WAMR_ROOT is required' >&2; exit 1; }
-ARTIFACT_ROOT="${WEAVE_CI_ARTIFACT_DIR:-${TMPDIR:-/tmp}/weave-qualification}"
-mkdir -p "$ARTIFACT_ROOT"
+weave_ci_artifacts_init weave-qualification ARTIFACT_ROOT
 
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js

@@ -1,5 +1,7 @@
 # Weave
 
+> AI Disclaimer: Worked on this/toyed with for years pre-ai; used AI-assistance starting in 2026; *not* vibecoded 🙂
+
 **Live migration for portable WebAssembly workloads, across machines and
 across runtimes.** Weave moves a *currently executing* woven module — its
 code, linear memory, globals, tables, host-service state, and live call stack
@@ -23,9 +25,13 @@ index at every runtime boundary:
 | 8 | funcref table mutation, passive-segment semantics, SIMD state, deep/mutual recursion across checkpoints | ✅ |
 | 9 | wasmtime → WAMR → wasmtime, including multiple memories and a cleared active data segment | ✅ |
 | 10 | Chrome → WAMR → Chrome → WAMR through WebSocket↔TCP relay | ✅ |
+| 11 | Chrome A → Chrome B → Chrome A directly over WebRTC DataChannels | ✅ |
 
-Run the native/Node/wazero matrix with `./scripts/e2e.sh`. The optional real
-Chrome/WAMR flow and its prerequisites live in [`demos/browser-wamr`](demos/browser-wamr/).
+Run the native/Node/wazero matrix with `./scripts/e2e.sh`. Runnable, verified
+three-runtime server and direct browser-peer examples live in
+[`demos/server-chain`](demos/server-chain/) and
+[`demos/browser-webrtc`](demos/browser-webrtc/); the Chrome/WAMR bridge remains
+in [`demos/browser-wamr`](demos/browser-wamr/).
 
 ## How is that possible?
 
@@ -87,18 +93,25 @@ crates/weave-host        engine-agnostic: page tracker, migration source/target
 crates/weave-wasmtime    wasmtime plugin (poll host fn, instance, serve node)
 crates/weave-cli         `weave` binary: transform/run/checkpoint/restore/serve/migrate
 js/weave.mjs             plugin for JS runtimes (browser-clean core: standard WebAssembly API)
-js/weave-browser.mjs     bounded WebSocket byte-stream adapter for browsers
+js/weave-browser.mjs     bounded WebSocket and WebRTC byte-stream adapters
 js/weave-node.mjs        Node.js node runner (TCP transport + CLI)
 go/weave-wazero          wazero (pure-Go) node runner
 wamr/                    WAMR 2.4.4 adapter and symmetric node CLI
-demos/                   runnable examples, including Chrome ↔ WAMR
+demos/                   runnable server-chain, browser-P2P, and Chrome↔WAMR examples
 guests/                  test guests (WAT + Rust wasm32-unknown-unknown)
 docs/                    DESIGN.md, ABI.md, PROTOCOL.md
-scripts/e2e.sh           automated wasmtime/Node/wazero verification matrix
+scripts/e2e.sh           compatibility shim into the centralized native E2E
+.github/ci/              centralized CI commands, pins, conformance, and setup
+.github/workflows/       thin PR/main/nightly/corpus/qualification orchestration
 ```
 
 For a real browser round trip, continue with the
-[`Chrome ↔ WAMR demo`](demos/browser-wamr/README.md).
+[`browser ↔ browser WebRTC demo`](demos/browser-webrtc/README.md) or the
+[`Chrome ↔ WAMR demo`](demos/browser-wamr/README.md). The
+[`three-server chain`](demos/server-chain/README.md) is the shortest verified
+cross-runtime native walkthrough.
+For the required and scheduled verification topology, local replay commands,
+and artifact policy, see [`docs/CI.md`](docs/CI.md).
 
 ## Quickstart
 
@@ -167,9 +180,12 @@ internal state uses SIMD.
 - Every target requires an exact, byte-compatible host-service set. Open
   files, sockets, DOM nodes, JavaScript closures, GPU objects, and arbitrary
   WASI state do not migrate unless modeled by such a service.
-- Native protocol-v2 nodes speak unauthenticated TCP. The browser demo is
-  loopback-only by default; use its token/origin controls and terminate TLS
-  before exposing it to a network.
+- Native protocol-v2 nodes speak unauthenticated TCP. Browser demo servers are
+  loopback-only by default; the browser-peer launcher generates a local access
+  token. Use per-peer authorization, explicit origin/proxy policy, module
+  allowlists, quotas, and TLS before exposing signaling or relay endpoints to
+  a network. WebRTC encrypts DataChannels but does not authenticate
+  application-level migration policy or a malicious signaling service.
 - Incoming modules are capped at 512 MiB in Rust/JS (256 MiB in wazero), and
   aggregate memory accepted at handoff is capped at 1 GiB by default. This is
   not a lifetime cap on later guest `memory.grow` instructions.

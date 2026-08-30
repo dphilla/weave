@@ -1,0 +1,40 @@
+{
+  "name": "@weave-net/browser-transports",
+  "version": "0.1.0",
+  "description": "Bounded byte-stream adapters for browser WebSocket and RTCDataChannel transports",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs",
+      "default": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src",
+    "index.d.ts",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dphilla/weave.git",
+    "directory": "packages/browser-transports"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "websocket",
+    "webrtc",
+    "datachannel",
+    "byte-stream",
+    "browser"
+  ],
+  "license": "Apache-2.0"
+}

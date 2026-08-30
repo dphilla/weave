@@ -1,0 +1,20 @@
+# Reusable networking packages
+
+This directory contains installable networking components whose public APIs do
+not depend on the Weave migration protocol:
+
+- `@weave-net/browser-transports` adapts browser WebSocket and reliable,
+  ordered RTCDataChannel objects to bounded byte streams.
+- `@weave-net/node-transports` adapts Node TCP sockets to the same exact-read,
+  ordered-write contract.
+- `@weave-net/ws-tcp-gateway` bridges a normalized binary WebSocket endpoint
+  to a Node duplex stream without inspecting the carried bytes.
+
+The repository root is the only JavaScript workspace and lockfile boundary.
+Packages contain only their runtime source, public type declarations, tests,
+and package documentation. CI orchestration and package-install smoke tests
+remain centralized under `.github/ci/`.
+
+The legacy files under `js/` remain supported Weave integration entry points.
+They add Weave protocol defaults and re-export these packages, so existing
+demos and consumers do not need an immediate import migration.

@@ -1,0 +1,17 @@
+{
+  "name": "weave-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": ".github/ci/run-unit.sh js",
+    "test:packages": "node --test packages/*/test/*.test.mjs",
+    "pack:check": ".github/ci/package-smoke.sh"
+  }
+}

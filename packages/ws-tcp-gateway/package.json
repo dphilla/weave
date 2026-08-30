@@ -1,0 +1,28 @@
+{
+  "name": "@weave-net/ws-tcp-gateway",
+  "version": "0.1.0",
+  "description": "Dependency-free, byte-transparent WebSocket to Node duplex bridge core",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dphilla/weave.git",
+    "directory": "packages/ws-tcp-gateway"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs"
+    }
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "src/index.mjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "sideEffects": false
+}

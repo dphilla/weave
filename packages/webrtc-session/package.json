@@ -1,0 +1,42 @@
+{
+  "name": "@weave-net/webrtc-session",
+  "version": "0.1.0",
+  "description": "Dependency-free headless WebRTC DataChannel session negotiation",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs",
+      "default": "./src/index.mjs"
+    }
+  },
+  "files": [
+    "src/index.mjs",
+    "index.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dphilla/weave.git",
+    "directory": "packages/webrtc-session"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "webrtc",
+    "datachannel",
+    "signaling",
+    "ice",
+    "peer-to-peer",
+    "browser"
+  ],
+  "license": "Apache-2.0"
+}

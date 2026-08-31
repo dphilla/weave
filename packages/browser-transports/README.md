@@ -13,6 +13,10 @@ an application framing protocol.
 npm install @weave-net/browser-transports
 ```
 
+Registry publication is not automated yet. From this checkout, create the same
+installable artifact with `npm pack --workspace @weave-net/browser-transports`,
+then install the resulting `.tgz`.
+
 The source is ESM and relies only on browser APIs. Node 18 or newer is the
 supported floor for running its tests and compatible injected transports.
 
@@ -122,7 +126,10 @@ contains the terminal error. Reads and writes surface that error directly.
 ## Development
 
 ```sh
-node --test
+npm run test:packages
+.github/ci/package-smoke.sh
 ```
 
-The package has no runtime dependencies and is licensed under Apache-2.0.
+Run these from the repository root. Test orchestration and the one workspace
+lockfile remain centralized there; this package has no runtime dependencies
+and is licensed under Apache-2.0.

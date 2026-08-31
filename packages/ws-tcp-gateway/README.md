@@ -7,6 +7,16 @@ logic, so the bridge can carry any ordered byte stream.
 
 The package requires Node.js 18 or newer and is licensed under Apache-2.0.
 
+## Install
+
+```sh
+npm install @weave-net/ws-tcp-gateway
+```
+
+Registry publication is not automated yet. From this checkout, create the same
+installable artifact with `npm pack --workspace @weave-net/ws-tcp-gateway`,
+then install the resulting `.tgz`.
+
 ## API
 
 ```js

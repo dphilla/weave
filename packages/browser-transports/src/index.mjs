@@ -51,12 +51,20 @@ async function messageBytes(value) {
 
 function addListener(target, type, listener) {
   if (typeof target.addEventListener === "function") {
+    if (typeof target.removeEventListener !== "function") {
+      throw new TypeError(
+        "transport EventTarget must provide removeEventListener with addEventListener",
+      );
+    }
     target.addEventListener(type, listener);
     return () => target.removeEventListener(type, listener);
   }
   if (typeof target.on === "function") {
+    if (typeof target.off !== "function") {
+      throw new TypeError("transport emitter must provide off with on");
+    }
     target.on(type, listener);
-    return () => target.off?.(type, listener);
+    return () => target.off(type, listener);
   }
   throw new TypeError("transport is not an EventTarget");
 }

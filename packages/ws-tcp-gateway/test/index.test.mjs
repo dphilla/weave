@@ -122,6 +122,25 @@ test("passes bytes unchanged in both directions and closes idempotently", () => 
   assertBridgeListenersRemoved(websocket, duplex);
 });
 
+test("rejects text-mode endpoint data instead of silently reframing it", () => {
+  const observed = [];
+  const websocket = new FakeWebSocket();
+  const duplex = new FakeDuplex();
+  const bridge = bridgeWebSocketToDuplex(websocket, duplex, {
+    closeTimeoutMs: 0,
+    onError(error, context) {
+      observed.push([error.message, context.side]);
+    },
+  });
+
+  duplex.emit("data", "text from a stream with setEncoding() enabled");
+
+  assert.equal(bridge.closed, true);
+  assert.deepEqual(observed, [["duplex endpoint emitted a non-binary chunk", "duplex"]]);
+  assert.deepEqual(websocket.closeCalls, [{ code: 1011, reason: "duplex endpoint failed" }]);
+  assertBridgeListenersRemoved(websocket, duplex);
+});
+
 test("propagates duplex write backpressure to incoming WebSocket delivery", () => {
   const websocket = new FakeWebSocket();
   const duplex = new FakeDuplex();
@@ -203,6 +222,27 @@ test("WebSocket errors close the duplex after the configured grace period", asyn
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(duplex.destroyCount, 1);
   assert.deepEqual(observed, [["socket failed", "browser", "websocket"]]);
+  assertBridgeListenersRemoved(websocket, duplex);
+});
+
+test("observes duplex errors that arrive during graceful shutdown", async () => {
+  const observed = [];
+  const websocket = new FakeWebSocket();
+  const duplex = new FakeDuplex();
+  const bridge = bridgeWebSocketToDuplex(websocket, duplex, {
+    closeTimeoutMs: 5,
+    onError(error, context) {
+      observed.push([error.message, context.side]);
+    },
+  });
+
+  websocket.emit("close", { code: 1000, reason: "done" });
+  assert.equal(bridge.closed, true);
+  duplex.emit("error", new Error("late socket failure"));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(observed, [["late socket failure", "duplex"]]);
+  assert.equal(duplex.destroyCount, 1);
   assertBridgeListenersRemoved(websocket, duplex);
 });
 

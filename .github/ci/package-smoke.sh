@@ -53,11 +53,13 @@ cd "$CONSUMER_DIR"
 
 "$NODE_BIN" --input-type=module -e '
   const browser = await import("@weave-net/browser-transports");
+  const webrtc = await import("@weave-net/webrtc-session");
   const node = await import("@weave-net/node-transports");
   const gateway = await import("@weave-net/ws-tcp-gateway");
   for (const [name, value] of [
     ["WebSocketByteStream", browser.WebSocketByteStream],
     ["RTCDataChannelByteStream", browser.RTCDataChannelByteStream],
+    ["WebRTCSession", webrtc.WebRTCSession],
     ["TcpTransport", node.TcpTransport],
     ["bridgeWebSocketToDuplex", gateway.bridgeWebSocketToDuplex],
   ]) {

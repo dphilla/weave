@@ -1,8 +1,9 @@
 # Reusable networking packages
 
-Weave's JavaScript byte transports and WebSocket-to-duplex bridge are reusable
-workspace packages. They move opaque bytes and do not import the migration
-engine, inspect Weave frames, instantiate WebAssembly, or depend on a demo.
+Weave's JavaScript byte transports, headless WebRTC session, and
+WebSocket-to-duplex bridge are reusable workspace packages. They do not import
+the migration engine, inspect Weave frames, instantiate WebAssembly, or depend
+on a demo.
 
 The packages are versioned `0.1.0` and can be packed and installed today. They
 are not automatically published to a registry; publication remains a separate
@@ -13,6 +14,7 @@ release decision.
 | Package | Owns | Deliberately does not own |
 |---|---|---|
 | `@weave-net/browser-transports` | Bounded WebSocket and reliable ordered RTCDataChannel byte streams | PeerConnection setup, signaling, ICE/TURN, discovery, or application framing |
+| `@weave-net/webrtc-session` | One fixed-role initial offer/answer, trickled ICE ordering, raw DataChannels, connection lifecycle, and selected-path diagnostics | Signaling transport, rooms, authentication, retry, STUN/TURN provisioning, application channel policy, bytes, media, or renegotiation |
 | `@weave-net/node-transports` | Bounded Node TCP streams, finite dialing, and optional first-byte classification | Application protocols, listeners, routing, admission, or migration |
 | `@weave-net/ws-tcp-gateway` | Byte-transparent, backpressured bridging between a normalized binary WebSocket and a Node duplex | WebSocket handshakes, TCP dialing, routes, target selection, static files, or authentication |
 
@@ -79,6 +81,52 @@ semantics.
 
 The receive limit is applied before bytes reach pending readers, and an exact
 read larger than the configured receive budget is rejected immediately.
+
+## Headless WebRTC session
+
+`@weave-net/webrtc-session` establishes a raw DataChannel session without a
+DOM, server route, or signaling dependency:
+
+```js
+import { WebRTCSession } from "@weave-net/webrtc-session";
+
+const session = new WebRTCSession({
+  role: "offerer",
+  rtcConfiguration: { iceServers },
+  sendSignal(message, { signal }) {
+    return rendezvous.send(message, { signal });
+  },
+  onDataChannel(channel) {
+    application.acceptChannel(channel);
+  },
+});
+
+// Install the application's receive path before negotiation can produce a
+// response.
+rendezvous.onMessage((message) => session.receiveSignal(message));
+
+session.createDataChannel("files", {
+  ordered: true,
+  protocol: "files.v1",
+});
+await session.start();
+await session.connected;
+```
+
+An answerer uses the same constructor with `role: "answerer"` and receives
+the offerer's channels through `onDataChannel`. The package serializes
+concurrent inbound signaling, sends the local description before every
+candidate, preserves candidate FIFO including the null end marker, and bounds
+candidates received before remote SDP. It accepts the complete caller-owned
+`rtcConfiguration` and supplies no default public STUN or TURN service.
+
+The v0.1 session performs exactly one fixed-role negotiation. It does not
+implement perfect negotiation/glare, renegotiation, ICE restart, multiparty
+topology, media tracks, or negotiated DataChannels. It returns raw channels;
+compose a reliable ordered channel with `@weave-net/browser-transports` when
+an exact byte stream is required. Signaling adapters remain responsible for
+authenticated routing, retry/idempotency, rooms, discovery, and at-most-once
+delivery.
 
 ## Node TCP transport
 
@@ -162,6 +210,7 @@ package.json
 package-lock.json
 packages/
   browser-transports/
+  webrtc-session/
   node-transports/
   ws-tcp-gateway/
 .github/ci/
@@ -191,7 +240,8 @@ clean-consumer check.
 
 ## Current stopping point
 
-This extraction intentionally does not yet provide a reusable WebRTC dial or
-accept API. The next milestone is the separately reviewed headless browser
-session: PeerConnection lifecycle, offer/answer, trickle ICE, channel creation,
-and an injected signaling interface with no DOM or Weave migration dependency.
+The reusable browser layers now stop at raw WebRTC DataChannels and bounded
+byte streams. They do not provide native WebRTC or a process protocol. The next
+separately reviewed milestone is the generic sidecar: a language-independent
+local boundary that lets native runtimes use WebRTC without embedding a full
+ICE/DTLS/SCTP stack in each runtime.

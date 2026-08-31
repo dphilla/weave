@@ -147,8 +147,12 @@ minimal WebSocket server remain demo integration concerns.
 The [`browser-webrtc`](../demos/browser-webrtc/) demo keeps WebRTC signaling
 separate. Its bounded HTTP service exchanges opaque SDP offer/answer and ICE
 candidate JSON with idempotent POST request IDs; migration frames flow only
-over the established DataChannel. Its target allowlists the served demo
-module through `acceptMigration`'s offer-admission hook. Host candidates are
+over the established DataChannel. The application-neutral
+`@weave-net/webrtc-session` package owns the fixed-role initial negotiation,
+trickled ICE ordering, and PeerConnection lifecycle; the demo still owns HTTP
+rooms/authentication, its channel allowlist, and every Weave message. Its
+target allowlists the served demo module through `acceptMigration`'s
+offer-admission hook. Host candidates are
 sufficient for the local demo. Cross-network deployments normally add STUN
 discovery and a TURN fallback; a TURN-selected path relays all migration bytes
 and should be budgeted accordingly.

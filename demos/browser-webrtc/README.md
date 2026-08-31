@@ -20,10 +20,12 @@ protocol, state verification, and PREPARED/COMMIT ownership boundary are
 unchanged. The automated browser qualification currently covers Chrome; other
 standards-compatible browsers are expected but not yet a CI claim.
 
-The byte adapter now comes from the reusable
-`@weave-net/browser-transports` package. PeerConnection creation, signaling,
-ICE handling, fixed A/B roles, and Weave control channels still live in this
-demo; extracting that headless session is the next separately reviewed step.
+The byte adapter comes from `@weave-net/browser-transports`. The reusable
+`@weave-net/webrtc-session` package owns PeerConnection construction, the
+fixed-role initial offer/answer exchange, trickled ICE ordering, connection
+lifecycle, and raw DataChannel creation. This demo supplies the bounded HTTP
+signaling adapter, A/B room and token policy, reliable channel allowlist,
+control messages, and Weave migration logic.
 
 ## Run it locally
 
@@ -48,9 +50,10 @@ on <http://127.0.0.1:8790/>. Its printed launch URL includes a newly generated
    The last A `EMIT n …` and first B emission must be `EMIT n+50000 …`.
 5. Click **Migrate to other peer** in B to send the same instance back to A.
 
-Each direction has a dedicated one-shot migration channel. Reload both pages
-for another round trip; this makes channel lifetime and failure ownership
-unambiguous in the demo.
+Each direction has a dedicated one-shot migration channel. Start from a fresh
+base launch URL for another round trip so peer A generates a new room. A reload
+of the same room is not a signaling reset: the bounded server retains that
+room's prior SDP/ICE history until its TTL expires.
 
 To run the pieces manually or use another already-woven module:
 
@@ -170,15 +173,17 @@ Dependency-free unit and real-loopback signaling tests:
 ```sh
 node --test \
   demos/browser-wamr/browser-transport.test.mjs \
-  demos/browser-webrtc/server.test.mjs
+  demos/browser-webrtc/server.test.mjs \
+  packages/webrtc-session/test/session.test.mjs
 ```
 
 They cover stream coalescing/splitting, fragmentation and negotiated message
-ceilings, reliability rejection, receive/close bounds, ordered and idempotent
+ceilings, reliability rejection, receive/close bounds, headless offer/answer
+and ICE ordering, session timeouts and cleanup, ordered and idempotent HTTP
 signaling in both directions, authorization, queue expiry/byte limits,
-cross-site browser-request rejection, static-route allowlisting, and public-bind
-protection. The optional real two-tab round trip needs Node 22+ and
-Chrome/Chromium:
+cross-site browser-request rejection, static-route allowlisting, and
+public-bind protection. The optional real two-tab round trip needs Node 22+
+and Chrome/Chromium:
 
 ```sh
 node demos/browser-webrtc/e2e-smoke.mjs --require

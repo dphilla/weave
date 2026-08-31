@@ -11,6 +11,10 @@ import {
   RTCDataChannelByteStream,
   WEAVE_DATA_CHANNEL_PROTOCOL,
 } from "/weave-browser.mjs";
+import {
+  WebRTCSession,
+  getSelectedCandidatePath,
+} from "/packages/webrtc-session/src/index.mjs";
 
 const $ = (selector) => document.querySelector(selector);
 const elements = {
@@ -56,13 +60,11 @@ if (token) fragment.set("token", token);
 history.replaceState(null, "", `#${fragment}`);
 
 const state = {
+  session: null,
   peerConnection: null,
   signaling: null,
   channels: new Map(),
   control: null,
-  pendingRemoteCandidates: [],
-  pendingLocalCandidates: [],
-  localDescriptionSent: false,
   statsTimer: null,
   moduleBytes: null,
   moduleHashHex: null,
@@ -208,7 +210,7 @@ class SignalingClient {
         if (timedOut) error = new Error("signaling POST timed out after 5000 ms");
         const transient = error.status === undefined || error.status === 408 || error.status === 429 || error.status >= 500;
         if (!transient || attempt >= 5) throw error;
-        await new Promise((resolve) => setTimeout(resolve, Math.min(250 * 2 ** attempt, 2_000)));
+        await this.wait(Math.min(250 * 2 ** attempt, 2_000));
       } finally {
         clearTimeout(timer);
         this.controller.signal.removeEventListener("abort", forwardAbort);
@@ -217,6 +219,19 @@ class SignalingClient {
   }
 
   start() { void this.poll(); }
+
+  wait(delayMs) {
+    if (this.controller.signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.controller.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, delayMs);
+      this.controller.signal.addEventListener("abort", done, { once: true });
+    });
+  }
 
   async poll() {
     while (!this.stopped) {
@@ -247,7 +262,7 @@ class SignalingClient {
           return;
         }
         log(`signaling poll failed; retrying: ${error.message}`, "error");
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await this.wait(500);
       }
     }
   }
@@ -301,21 +316,29 @@ function registerDataChannel(channel) {
     throw new Error(`channel ${channel.label} uses protocol ${channel.protocol || "<empty>"}, expected ${expectedProtocol}`);
   }
   state.channels.set(channel.label, channel);
-  channel.addEventListener("open", () => {
+  let opened = false;
+  const markOpen = () => {
+    if (opened) return;
+    opened = true;
     log(`${channel.label} data channel open`, "wire");
     if (channel.label === "control") {
       state.control = channel;
       channel.addEventListener("message", (event) => { void handleControlMessage(event.data); });
     }
     refreshControls();
-  });
+  };
+  channel.addEventListener("open", markOpen);
   channel.addEventListener("close", () => {
     log(`${channel.label} data channel closed`);
     if (channel.label === "control") state.control = null;
     refreshControls();
   });
   channel.addEventListener("error", () => log(`${channel.label} data channel failed`, "error"));
-  if (channel.readyState === "open") queueMicrotask(() => channel.dispatchEvent(new Event("open")));
+  if (channel.readyState === "open") {
+    queueMicrotask(() => {
+      if (channel.readyState === "open") markOpen();
+    });
+  }
 }
 
 async function handleControlMessage(raw) {
@@ -416,76 +439,14 @@ async function armIncomingMigration(label) {
   }
 }
 
-async function handleSignal(message) {
-  const pc = state.peerConnection;
-  if (!message || typeof message !== "object") throw new Error("invalid signaling message");
-  switch (message.type) {
-    case "description": {
-      const description = message.description;
-      const expected = peer === "a" ? "answer" : "offer";
-      if (!description || description.type !== expected || typeof description.sdp !== "string") {
-        throw new Error(`peer ${peer} expected an ${expected}`);
-      }
-      await pc.setRemoteDescription(description);
-      while (state.pendingRemoteCandidates.length > 0) {
-        await pc.addIceCandidate(state.pendingRemoteCandidates[0]);
-        state.pendingRemoteCandidates.shift();
-      }
-      if (peer === "b") {
-        await pc.setLocalDescription(await pc.createAnswer());
-        await publishLocalDescription();
-      }
-      break;
-    }
-    case "candidate":
-      if (message.candidate !== null && typeof message.candidate !== "object") {
-        throw new Error("invalid ICE candidate");
-      }
-      if (pc.remoteDescription) await pc.addIceCandidate(message.candidate);
-      else state.pendingRemoteCandidates.push(message.candidate);
-      break;
-    default:
-      throw new Error(`unknown signaling message ${message.type}`);
-  }
-}
-
-async function publishLocalDescription() {
-  await state.signaling.send({
-    type: "description",
-    description: state.peerConnection.localDescription.toJSON(),
-  });
-  // Keep gathering events in this FIFO until every older candidate has been
-  // published. In particular, never let the null end-of-candidates marker
-  // overtake a candidate while an HTTP POST is awaiting its response.
-  while (state.pendingLocalCandidates.length > 0) {
-    await state.signaling.send({ type: "candidate", candidate: state.pendingLocalCandidates[0] });
-    state.pendingLocalCandidates.shift();
-  }
-  state.localDescriptionSent = true;
-}
-
 async function updateSelectedPath() {
-  const pc = state.peerConnection;
-  if (!pc || pc.connectionState !== "connected") return;
+  if (!state.session || state.peerConnection?.connectionState !== "connected") return;
   try {
-    const report = await pc.getStats();
-    let pair = null;
-    for (const item of report.values()) {
-      if (item.type === "transport" && item.selectedCandidatePairId) pair = report.get(item.selectedCandidatePairId);
-    }
-    if (!pair) {
-      for (const item of report.values()) {
-        if (item.type === "candidate-pair" && item.state === "succeeded" && item.nominated) pair = item;
-      }
-    }
-    if (!pair) return;
-    const local = report.get(pair.localCandidateId);
-    const remote = report.get(pair.remoteCandidateId);
-    const relayed = local?.candidateType === "relay" || remote?.candidateType === "relay";
-    const protocol = local?.relayProtocol ?? local?.protocol ?? remote?.protocol ?? "udp";
-    elements.metricPath.textContent = relayed
-      ? `TURN relay (${protocol})`
-      : `${local?.candidateType ?? "direct"} ↔ ${remote?.candidateType ?? "direct"} (${protocol})`;
+    const path = await getSelectedCandidatePath(state.peerConnection);
+    if (!path) return;
+    elements.metricPath.textContent = path.relayed
+      ? `TURN relay (${path.protocol ?? "unknown"})`
+      : `${path.localCandidateType ?? "direct"} ↔ ${path.remoteCandidateType ?? "direct"} (${path.protocol ?? "unknown"})`;
   } catch {
     // Stats availability differs slightly among browsers; it is diagnostic.
   }
@@ -501,49 +462,72 @@ async function startPeerConnection() {
   const config = await configResponse.json();
   if (config.tokenRequired && !token) throw new Error("this signaling server requires a token in the URL fragment");
 
-  state.signaling = new SignalingClient({
+  let signaling;
+  const session = new WebRTCSession({
+    role: peer === "a" ? "offerer" : "answerer",
+    rtcConfiguration: { iceServers: config.iceServers },
+    // A human may copy the link and open peer B long after peer A starts.
+    connectTimeoutMs: 0,
+    sendSignal(message) {
+      return signaling.send(message);
+    },
+    onDataChannel(channel) {
+      try {
+        registerDataChannel(channel);
+      } catch (error) {
+        try { channel.close(); } catch { /* rejection is already being reported */ }
+        log(`rejected data channel: ${error.message}`, "error");
+      }
+    },
+    onStateChange({ connectionState }) {
+      setBadge(
+        elements.connectionState,
+        connectionState,
+        connectionState === "connected"
+          ? ""
+          : connectionState === "failed" || connectionState === "closed" ? "error" : "busy",
+      );
+      log(
+        `peer connection ${connectionState}`,
+        connectionState === "failed" ? "error" : "wire",
+      );
+      if (connectionState === "connected") void updateSelectedPath();
+      refreshControls();
+    },
+    onIceCandidateError(event) {
+      log(
+        `ICE server error ${event.errorCode ?? ""}: ${event.errorText ?? "candidate gathering failed"}`,
+        "error",
+      );
+    },
+    onError(error, { fatal, phase }) {
+      if (fatal) log(`WebRTC ${phase} failed: ${error.message}`, "error");
+    },
+  });
+  state.session = session;
+  state.peerConnection = session.peerConnection;
+  // The demo waits for connection state and its explicit three-channel gate
+  // independently. Observe terminal pre-connection failures without leaving
+  // an unhandled promise rejection in a human-driven page.
+  void session.connected.catch(() => {});
+
+  signaling = new SignalingClient({
     roomName: room,
     peerName: peer,
     accessToken: token,
-    onMessage: handleSignal,
+    onMessage(message) {
+      return session.receiveSignal(message);
+    },
     onFatal(error) {
+      session.fail(error);
       setBadge(elements.connectionState, "signaling failed", "error");
       log(`signaling session stopped: ${error.message}; reload both peers`, "error");
-      state.peerConnection?.close();
       refreshControls();
     },
   });
-  state.signaling.start();
-
-  const pc = new RTCPeerConnection({ iceServers: config.iceServers });
-  state.peerConnection = pc;
-  pc.addEventListener("icecandidate", (event) => {
-    const candidate = event.candidate?.toJSON() ?? null;
-    if (state.localDescriptionSent) {
-      void state.signaling.send({ type: "candidate", candidate }).catch((error) => {
-        state.signaling.fail(new Error(`could not publish ICE candidate: ${error.message}`));
-      });
-    } else {
-      state.pendingLocalCandidates.push(candidate);
-    }
-  });
-  pc.addEventListener("datachannel", (event) => {
-    try { registerDataChannel(event.channel); }
-    catch (error) { log(`rejected data channel: ${error.message}`, "error"); }
-  });
-  pc.addEventListener("connectionstatechange", () => {
-    const connection = pc.connectionState;
-    setBadge(
-      elements.connectionState,
-      connection,
-      connection === "connected" ? "" : connection === "failed" || connection === "closed" ? "error" : "busy",
-    );
-    log(`peer connection ${connection}`, connection === "failed" ? "error" : "wire");
-    if (connection === "connected") void updateSelectedPath();
-    refreshControls();
-  });
-  pc.addEventListener("icecandidateerror", (event) => {
-    log(`ICE server error ${event.errorCode ?? ""}: ${event.errorText ?? "candidate gathering failed"}`, "error");
+  state.signaling = signaling;
+  void session.closed.then(() => {
+    if (state.signaling === signaling) signaling.stop();
   });
 
   if (peer === "a") {
@@ -552,10 +536,16 @@ async function startPeerConnection() {
       ["a-to-b", WEAVE_DATA_CHANNEL_PROTOCOL],
       ["b-to-a", WEAVE_DATA_CHANNEL_PROTOCOL],
     ]) {
-      registerDataChannel(pc.createDataChannel(label, { ordered: true, protocol }));
+      session.createDataChannel(label, { ordered: true, protocol });
     }
-    await pc.setLocalDescription(await pc.createOffer());
-    await publishLocalDescription();
+  }
+
+  // Construction, callbacks, and the package's PeerConnection listeners are
+  // complete before polling can deliver a pre-existing offer or candidate.
+  await session.start();
+  signaling.start();
+
+  if (peer === "a") {
     log("offer published; open the peer B link", "wire");
   } else {
     log("waiting for peer A's offer", "wire");
@@ -855,7 +845,7 @@ elements.clearLog.addEventListener("click", () => {
 window.addEventListener("pagehide", () => {
   clearInterval(state.statsTimer);
   state.signaling?.stop();
-  state.peerConnection?.close();
+  void state.session?.close();
 });
 
 setBadge(elements.runtimeState, peer === "a" ? "idle source" : "idle target", "muted");
@@ -866,7 +856,7 @@ refreshControls();
 
 Promise.all([loadModule(), startPeerConnection()]).catch((error) => {
   state.signaling?.stop();
-  state.peerConnection?.close();
+  void state.session?.close();
   setBadge(elements.connectionState, "setup failed", "error");
   log(`demo setup failed: ${error.stack ?? error}`, "error");
   refreshControls();

@@ -5,6 +5,9 @@ not depend on the Weave migration protocol:
 
 - `@weave-net/browser-transports` adapts browser WebSocket and reliable,
   ordered RTCDataChannel objects to bounded byte streams.
+- `@weave-net/webrtc-session` owns one headless offer/answer negotiation,
+  trickled ICE, raw DataChannel creation, and PeerConnection lifecycle while
+  leaving signaling transport and application policy injectable.
 - `@weave-net/node-transports` adapts Node TCP sockets to the same exact-read,
   ordered-write contract.
 - `@weave-net/ws-tcp-gateway` bridges a normalized binary WebSocket endpoint

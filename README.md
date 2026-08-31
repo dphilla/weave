@@ -92,7 +92,7 @@ crates/weave-transform   the instrumenting compiler (the heart of Weave)
 crates/weave-host        engine-agnostic: page tracker, migration source/target
 crates/weave-wasmtime    wasmtime plugin (poll host fn, instance, serve node)
 crates/weave-cli         `weave` binary: transform/run/checkpoint/restore/serve/migrate
-packages/                reusable browser/TCP byte transports and gateway core
+packages/                reusable byte transports, headless WebRTC session, and gateway core
 js/weave.mjs             plugin for JS runtimes (browser-clean core: standard WebAssembly API)
 js/weave-browser.mjs     Weave defaults and compatibility exports for browser transports
 js/weave-node.mjs        Node.js node runner (TCP transport + CLI)

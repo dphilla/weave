@@ -140,7 +140,7 @@ test("WebSocketByteStream bounds unread input", async () => {
   socket.message(Uint8Array.of(1, 2, 3, 4));
   await stream.closed;
   assert.equal(socket.closeInfo.code, 1009);
-  await assert.rejects(stream.readExact(5), /receive buffer exceeded/);
+  await assert.rejects(stream.readExact(1), /receive buffer exceeded/);
 });
 
 test("RTCDataChannelByteStream removes message boundaries and chunks writes", async () => {
@@ -186,6 +186,12 @@ test("RTCDataChannelByteStream refuses unordered or partially reliable channels"
     () => new RTCDataChannelByteStream(new FakeDataChannel({ protocol: "another.protocol" })),
     /protocol must be weave\.v2/,
   );
+  assert.doesNotThrow(
+    () => new RTCDataChannelByteStream(
+      new FakeDataChannel({ protocol: "another.protocol" }),
+      { connectTimeoutMs: 0, requiredProtocol: null },
+    ),
+  );
 });
 
 test("RTCDataChannelByteStream bounds unread input", async () => {
@@ -199,7 +205,7 @@ test("RTCDataChannelByteStream bounds unread input", async () => {
 
   await stream.closed;
   assert.equal(channel.readyState, "closed");
-  await assert.rejects(stream.readExact(5), /receive buffer exceeded/);
+  await assert.rejects(stream.readExact(1), /receive buffer exceeded/);
 });
 
 test("RTCDataChannelByteStream applies the receive bound before satisfying a large waiter", async () => {
@@ -209,7 +215,7 @@ test("RTCDataChannelByteStream applies the receive bound before satisfying a lar
     maxBufferedBytes: 3,
   });
   channel.open();
-  const pending = stream.readExact(4);
+  const pending = stream.readExact(3);
   channel.message(Uint8Array.of(1, 2, 3, 4));
 
   await assert.rejects(pending, /receive buffer exceeded/);

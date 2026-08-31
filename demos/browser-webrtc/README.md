@@ -20,6 +20,11 @@ protocol, state verification, and PREPARED/COMMIT ownership boundary are
 unchanged. The automated browser qualification currently covers Chrome; other
 standards-compatible browsers are expected but not yet a CI claim.
 
+The byte adapter now comes from the reusable
+`@weave-net/browser-transports` package. PeerConnection creation, signaling,
+ICE handling, fixed A/B roles, and Weave control channels still live in this
+demo; extracting that headless session is the next separately reviewed step.
+
 ## Run it locally
 
 Prerequisites are Node.js 18 or newer, Rust/Cargo, and two current browser

@@ -11,6 +11,11 @@ converts the browser's WebSocket transport to the TCP transport used by the
 native nodes. The browser can therefore be either the migration source or the
 migration target.
 
+The byte-transparent, backpressured bridge is the reusable
+`@weave-net/ws-tcp-gateway` package. This demo file supplies the intentionally
+separate WebSocket handshake, routes, target allowlist, origin/token policy,
+TCP dialing, and browser/native pairing.
+
 ## Prerequisites
 
 - Chrome (or another current browser with BigInt-enabled WebAssembly)

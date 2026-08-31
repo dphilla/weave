@@ -10,6 +10,10 @@ or impose framing on them.
 npm install @weave-net/node-transports
 ```
 
+Registry publication is not automated yet. From this checkout, create the same
+installable artifact with `npm pack --workspace @weave-net/node-transports`,
+then install the resulting `.tgz`.
+
 ## Connect and exchange bytes
 
 ```js

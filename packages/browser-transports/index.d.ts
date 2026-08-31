@@ -4,12 +4,17 @@ export const DEFAULT_MAX_WRITE_BYTES: number;
 export type ByteSource = ArrayBuffer | ArrayBufferView;
 export type TransportEventListener = (...args: any[]) => void;
 
-export interface EventTargetLike {
-  addEventListener?(type: string, listener: TransportEventListener): void;
-  removeEventListener?(type: string, listener: TransportEventListener): void;
-  on?(type: string, listener: TransportEventListener): void;
-  off?(type: string, listener: TransportEventListener): void;
+export interface DOMEventTargetLike {
+  addEventListener(type: string, listener: TransportEventListener): void;
+  removeEventListener(type: string, listener: TransportEventListener): void;
 }
+
+export interface EventEmitterLike {
+  on(type: string, listener: TransportEventListener): void;
+  off(type: string, listener: TransportEventListener): void;
+}
+
+export type EventTargetLike = DOMEventTargetLike | EventEmitterLike;
 
 export interface AbortSignalLike {
   readonly aborted: boolean;
@@ -43,13 +48,13 @@ export interface ByteStreamOptions {
   signal?: AbortSignalLike;
 }
 
-export interface WebSocketLike extends EventTargetLike {
+export type WebSocketLike = EventTargetLike & {
   readonly readyState: number;
   readonly bufferedAmount: number;
   binaryType: string;
   send(data: ByteSource): void;
   close(code?: number, reason?: string): void;
-}
+};
 
 export interface WebSocketConstructor {
   new(url: string | URL, protocols?: string | string[]): WebSocketLike;
@@ -97,7 +102,7 @@ export function connectWebSocket(
   options?: ConnectWebSocketOptions,
 ): Promise<WebSocketByteStream>;
 
-export interface RTCDataChannelLike extends EventTargetLike {
+export type RTCDataChannelLike = EventTargetLike & {
   readonly readyState: string;
   readonly ordered: boolean;
   readonly maxRetransmits: number | null;
@@ -108,13 +113,13 @@ export interface RTCDataChannelLike extends EventTargetLike {
   binaryType: string;
   send(data: ByteSource): void;
   close(): void;
-}
+};
 
 export interface RTCDataChannelByteStreamOptions extends ByteStreamOptions {
   /** Maximum bytes per DataChannel message. Defaults to 16 KiB. */
   maxChunkBytes?: number;
-  /** Negotiated SCTP ceiling; zero or Infinity means unknown/unbounded. */
-  maxMessageSize?: number;
+  /** Negotiated SCTP ceiling; null, zero, or Infinity means unknown/unbounded. */
+  maxMessageSize?: number | null;
   /** Maximum channel-close wait; zero disables. Defaults to 5 seconds. */
   closeTimeoutMs?: number;
   /** Maximum channel-open wait; zero disables. Defaults to 30 seconds. */

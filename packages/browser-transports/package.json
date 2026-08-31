@@ -15,7 +15,8 @@
   "files": [
     "src",
     "index.d.ts",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "repository": {

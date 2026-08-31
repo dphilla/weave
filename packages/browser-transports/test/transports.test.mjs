@@ -75,6 +75,17 @@ class FakeDataChannel extends EventEmitter {
   }
 }
 
+class BufferedWebSocket extends FakeWebSocket {
+  send(value) {
+    super.send(value);
+    this.bufferedAmount += value.byteLength;
+  }
+
+  drain() {
+    this.bufferedAmount = 0;
+  }
+}
+
 class BufferedDataChannel extends FakeDataChannel {
   send(value) {
     super.send(value);
@@ -98,6 +109,21 @@ class DelayedBlob extends Blob {
     return super.arrayBuffer();
   }
 }
+
+test("browser transports require paired listener installation and cleanup methods", () => {
+  const socket = {
+    readyState: 0,
+    bufferedAmount: 0,
+    binaryType: "blob",
+    send() {},
+    close() {},
+    addEventListener() {},
+  };
+  assert.throws(
+    () => new WebSocketByteStream(socket, { connectTimeoutMs: 0 }),
+    /must provide removeEventListener with addEventListener/,
+  );
+});
 
 test("WebSocketByteStream coalesces messages and serializes copied writes", async () => {
   const socket = new FakeWebSocket();
@@ -127,6 +153,26 @@ test("WebSocketByteStream preserves Blob arrival order", async () => {
   socket.message(new DelayedBlob(Uint8Array.of(1), 15));
   socket.message(new DelayedBlob(Uint8Array.of(2), 0));
   assert.deepEqual([...await reading], [1, 2]);
+});
+
+test("WebSocketByteStream applies bounded output backpressure", async () => {
+  const socket = new BufferedWebSocket();
+  const stream = new WebSocketByteStream(socket, {
+    connectTimeoutMs: 0,
+    highWaterMark: 2,
+    drainTimeoutMs: 100,
+  });
+  socket.open();
+
+  let settled = false;
+  const writing = stream.write(Uint8Array.of(1, 2, 3)).finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  assert.equal(socket.sent.length, 1);
+  assert.equal(settled, false);
+  socket.drain();
+  await writing;
 });
 
 test("connectWebSocket requests no subprotocol unless explicitly configured", async () => {
@@ -195,6 +241,22 @@ test("both adapters reject reads larger than their receive budget", async () => 
   });
   channel.open();
   await assert.rejects(dataChannelStream.readExact(4), /receive-buffer limit/);
+});
+
+test("open timeouts fail and close both transports", async () => {
+  const socket = new FakeWebSocket();
+  const webSocketStream = new WebSocketByteStream(socket, { connectTimeoutMs: 5 });
+  await assert.rejects(webSocketStream.opened, /handshake timed out/);
+  await webSocketStream.closed;
+  assert.equal(socket.closeInfo.reason, "connect timeout");
+
+  const channel = new FakeDataChannel();
+  const dataChannelStream = new RTCDataChannelByteStream(channel, {
+    connectTimeoutMs: 5,
+  });
+  await assert.rejects(dataChannelStream.opened, /open timed out/);
+  await dataChannelStream.closed;
+  assert.equal(channel.readyState, "closed");
 });
 
 test("RTC protocol validation is opt-in and exact when requested", () => {

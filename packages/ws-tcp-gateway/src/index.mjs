@@ -16,6 +16,13 @@ function normalizeError(value) {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+function requireBinaryChunk(value, side) {
+  if (!(value instanceof Uint8Array)) {
+    throw new TypeError(`${side} endpoint emitted a non-binary chunk`);
+  }
+  return value;
+}
+
 function validateWebSocket(websocket) {
   requireObject(websocket, "websocket");
   for (const method of [
@@ -68,6 +75,8 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
   let stopped = false;
   let waitingForDuplexDrain = false;
   let waitingForWebSocketDrain = false;
+  let forceCloseTimer = null;
+  let watchingDuplexShutdown = false;
 
   const report = (value, side) => {
     const error = normalizeError(value);
@@ -103,8 +112,15 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
 
   const onBinary = (bytes) => {
     if (stopped) return false;
+    let chunk;
     try {
-      const writable = duplex.write(bytes);
+      chunk = requireBinaryChunk(bytes, "WebSocket");
+    } catch (error) {
+      shutdown("websocket", error, 1011, "WebSocket endpoint failed");
+      return false;
+    }
+    try {
+      const writable = duplex.write(chunk);
       if (!writable && !waitingForDuplexDrain) {
         waitingForDuplexDrain = true;
         duplex.once("drain", onDuplexDrain);
@@ -118,8 +134,15 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
 
   const onDuplexData = (bytes) => {
     if (stopped) return;
+    let chunk;
     try {
-      const writable = websocket.sendBinary(bytes);
+      chunk = requireBinaryChunk(bytes, "duplex");
+    } catch (error) {
+      shutdown("duplex", error, 1011, "duplex endpoint failed");
+      return;
+    }
+    try {
+      const writable = websocket.sendBinary(chunk);
       if (!writable && !waitingForWebSocketDrain) {
         waitingForWebSocketDrain = true;
         duplex.pause();
@@ -167,10 +190,35 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
     }
   };
 
+  const finishDuplexShutdown = () => {
+    if (!watchingDuplexShutdown) return;
+    watchingDuplexShutdown = false;
+    if (forceCloseTimer !== null) clearTimeout(forceCloseTimer);
+    forceCloseTimer = null;
+    duplex.off("error", onClosingDuplexError);
+    duplex.off("close", finishDuplexShutdown);
+  };
+
+  const onClosingDuplexError = (error) => {
+    report(error, "duplex");
+  };
+
+  const watchDuplexShutdown = () => {
+    if (watchingDuplexShutdown || duplex.destroyed === true) return;
+    watchingDuplexShutdown = true;
+    // A socket can still fail after end() while its final bytes drain. Keep a
+    // bounded terminal observer so that failure cannot become an unhandled
+    // EventEmitter error after the active bridge listeners are detached.
+    duplex.on("error", onClosingDuplexError);
+    duplex.once("close", finishDuplexShutdown);
+  };
+
   const closeDuplex = (immediate) => {
     if (duplex.destroyed === true) return;
+    watchDuplexShutdown();
     if (immediate) {
       destroyDuplex();
+      if (duplex.destroyed === true) finishDuplexShutdown();
       return;
     }
     try {
@@ -178,15 +226,23 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
     } catch (error) {
       report(error, "duplex");
       destroyDuplex();
+      if (duplex.destroyed === true) finishDuplexShutdown();
       return;
     }
-    if (duplex.destroyed === true) return;
+    if (duplex.destroyed === true) {
+      finishDuplexShutdown();
+      return;
+    }
     if (closeTimeoutMs === 0) {
       destroyDuplex();
+      if (duplex.destroyed === true) finishDuplexShutdown();
       return;
     }
-    const timer = setTimeout(destroyDuplex, closeTimeoutMs);
-    timer.unref?.();
+    forceCloseTimer = setTimeout(() => {
+      destroyDuplex();
+      if (duplex.destroyed === true) finishDuplexShutdown();
+    }, closeTimeoutMs);
+    forceCloseTimer.unref?.();
   };
 
   function shutdown(side, error, code, reason) {

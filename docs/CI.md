@@ -92,6 +92,12 @@ STUN binding responder for deterministic loopback candidates. A separate
 forced-TURN matrix is still needed before claiming continuous qualification
 through restrictive enterprise/mobile networks.
 
+The JavaScript unit lane also packs every workspace under `packages/`, checks
+that its license and public-only file boundary are present, installs all
+tarballs into a clean temporary consumer, and imports their public exports.
+The implementation is centralized in `.github/ci/package-smoke.sh`; packages
+do not carry separate lockfiles or CI scripts.
+
 The manifest values map directly back to local environment variables and
 `conformance.sh --edge/--route`, making a failing job reproducible without
 copying workflow YAML.

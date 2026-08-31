@@ -21,6 +21,10 @@ bash -n scripts/*.sh
   printf '%s\n' 'scripts/cleanup.sh must be executable' >&2
   exit 1
 }
+[[ -x .github/ci/package-smoke.sh ]] || {
+  printf '%s\n' '.github/ci/package-smoke.sh must be executable' >&2
+  exit 1
+}
 
 .github/ci/artifact-lifecycle.test.sh
 .github/ci/cleanup.test.sh

@@ -159,6 +159,12 @@ test("relay carries bytes for browser source and browser target", { timeout: 10_
   const ingressAddress = relay.addresses.ingress;
 
   try {
+    const packageResponse = await fetch(
+      `http://127.0.0.1:${httpAddress.port}/packages/browser-transports/src/index.mjs`,
+    );
+    assert.equal(packageResponse.status, 200);
+    assert.match(await packageResponse.text(), /export class WebSocketByteStream/);
+
     // A hostile page cannot use DNS rebinding plus a matching forged Host
     // header to reach the tokenless loopback relay.
     const rebound = await connect(httpAddress);

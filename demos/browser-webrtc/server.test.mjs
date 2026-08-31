@@ -67,6 +67,11 @@ test("server exposes only bounded static/config routes", async () => {
     const wasmResponse = await fetch(`${base}/counter.woven.wasm`);
     assert.equal(wasmResponse.headers.get("content-type"), "application/wasm");
     assert.deepEqual([...new Uint8Array(await wasmResponse.arrayBuffer())], [0, 97, 115, 109]);
+    const transportResponse = await fetch(
+      `${base}/packages/browser-transports/src/index.mjs`,
+    );
+    assert.equal(transportResponse.status, 200);
+    assert.match(await transportResponse.text(), /export class RTCDataChannelByteStream/);
     assert.equal((await fetch(`${base}/../../README.md`)).status, 404);
   });
 });

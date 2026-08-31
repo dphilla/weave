@@ -14,6 +14,8 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { bridgeWebSocketToDuplex } from "../../packages/ws-tcp-gateway/src/index.mjs";
+
 export const WEAVE_WEBSOCKET_PROTOCOL = "weave.v2";
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const DEFAULT_MAX_MESSAGE_BYTES = 64 * 1024 * 1024 + 5;
@@ -210,6 +212,7 @@ export class ServerWebSocket extends EventEmitter {
     socket.on("data", (chunk) => this._ingest(chunk));
     socket.on("end", () => this._finish(1006, "WebSocket transport ended"));
     socket.on("close", () => this._finish(1006, "WebSocket transport closed"));
+    socket.on("drain", () => this.emit("drain"));
     socket.on("error", (error) => {
       this.emit("error", error);
       this._finish(1011, error.message);
@@ -328,6 +331,17 @@ export class ServerWebSocket extends EventEmitter {
     this._parse();
   }
 
+  setBinaryHandler(handler) {
+    if (handler !== null && typeof handler !== "function") {
+      throw new TypeError("binary handler must be a function or null");
+    }
+    this.onBinary = handler;
+  }
+
+  resumeIncoming() {
+    this.resume();
+  }
+
   sendBinary(payload) {
     if (this.closed) return false;
     return this.socket.write(encodeFrame(0x2, payload));
@@ -386,54 +400,12 @@ function connectTcp(address, timeoutMs) {
 }
 
 export function bridge(websocket, tcp, label = "peer") {
-  let stopped = false;
-  let tcpBackpressured = false;
-  let websocketBackpressured = false;
-
-  websocket.onBinary = (payload) => {
-    if (stopped) return false;
-    const writable = tcp.write(payload);
-    if (!writable && !tcpBackpressured) {
-      tcpBackpressured = true;
-      tcp.once("drain", () => {
-        tcpBackpressured = false;
-        websocket.resume();
-      });
-    }
-    return writable;
-  };
-
-  const stop = (fromWebSocket, error) => {
-    if (stopped) return;
-    stopped = true;
-    if (error) process.stderr.write(`relay: ${label}: ${error.message}\n`);
-    if (fromWebSocket) {
-      tcp.end();
-      const timer = setTimeout(() => tcp.destroy(), 2_000);
-      timer.unref?.();
-    } else if (!websocket.closed) {
-      websocket.close(error ? 1011 : 1000, error ? "TCP peer failed" : "TCP peer closed");
-    }
-  };
-
-  tcp.on("data", (chunk) => {
-    if (stopped) return;
-    const writable = websocket.sendBinary(chunk);
-    if (!writable && !websocketBackpressured) {
-      websocketBackpressured = true;
-      tcp.pause();
-      websocket.socket.once("drain", () => {
-        websocketBackpressured = false;
-        if (!stopped) tcp.resume();
-      });
-    }
+  return bridgeWebSocketToDuplex(websocket, tcp, {
+    label,
+    onError(error) {
+      process.stderr.write(`relay: ${label}: ${error.message}\n`);
+    },
   });
-  tcp.once("end", () => stop(false));
-  tcp.once("error", (error) => stop(false, error));
-  websocket.once("close", () => stop(true));
-  websocket.once("error", (error) => stop(true, error));
-  tcp.resume();
-  return { close: () => stop(true) };
 }
 
 class PairQueue {
@@ -446,10 +418,10 @@ class PairQueue {
 
   addWebSocket(websocket) {
     const item = { websocket, timer: null };
-    websocket.onBinary = () => {
+    websocket.setBinaryHandler(() => {
       websocket.close(1008, "do not send before a TCP source is paired");
       return false;
-    };
+    });
     item.timer = setTimeout(() => {
       websocket.close(1008, "timed out waiting for TCP source");
       this._remove(this.websockets, item);
@@ -514,6 +486,7 @@ const STATIC_ROUTES = new Map([
   ["/styles.css", [path.join(DEMO_DIR, "styles.css"), "text/css; charset=utf-8"]],
   ["/weave.mjs", [path.join(REPO_ROOT, "js/weave.mjs"), "text/javascript; charset=utf-8"]],
   ["/weave-browser.mjs", [path.join(REPO_ROOT, "js/weave-browser.mjs"), "text/javascript; charset=utf-8"]],
+  ["/packages/browser-transports/src/index.mjs", [path.join(REPO_ROOT, "packages/browser-transports/src/index.mjs"), "text/javascript; charset=utf-8"]],
   ["/counter.woven.wasm", [path.join(DEMO_DIR, "counter.woven.wasm"), "application/wasm"]],
 ]);
 

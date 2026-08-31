@@ -92,8 +92,9 @@ crates/weave-transform   the instrumenting compiler (the heart of Weave)
 crates/weave-host        engine-agnostic: page tracker, migration source/target
 crates/weave-wasmtime    wasmtime plugin (poll host fn, instance, serve node)
 crates/weave-cli         `weave` binary: transform/run/checkpoint/restore/serve/migrate
+packages/                reusable browser/TCP byte transports and gateway core
 js/weave.mjs             plugin for JS runtimes (browser-clean core: standard WebAssembly API)
-js/weave-browser.mjs     bounded WebSocket and WebRTC byte-stream adapters
+js/weave-browser.mjs     Weave defaults and compatibility exports for browser transports
 js/weave-node.mjs        Node.js node runner (TCP transport + CLI)
 go/weave-wazero          wazero (pure-Go) node runner
 wamr/                    WAMR 2.4.4 adapter and symmetric node CLI
@@ -105,6 +106,11 @@ scripts/cleanup.sh       safe allowlisted local artifact cleanup shim
 .github/ci/              centralized CI commands, pins, conformance, and setup
 .github/workflows/       thin PR/main/nightly/corpus/qualification orchestration
 ```
+
+The networking pieces under `packages/` are dependency-free, installable ESM
+packages rather than demo internals. Their public boundaries, examples,
+compatibility shims, and clean-package verification are documented in
+[`docs/NETWORK_PACKAGES.md`](docs/NETWORK_PACKAGES.md).
 
 For a real browser round trip, continue with the
 [`browser ↔ browser WebRTC demo`](demos/browser-webrtc/README.md) or the

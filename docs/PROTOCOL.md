@@ -115,9 +115,10 @@ ordering must match exactly before PREPARED.
 
 The JS core (`js/weave.mjs`) is transport-agnostic. It needs
 `{ readExact(n) -> Promise<Uint8Array>, write(bytes) -> Promise }`;
-`weave-node.mjs` supplies TCP and `weave-browser.mjs` supplies a bounded,
-backpressured WebSocket byte stream plus a reliable ordered RTCDataChannel
-adapter:
+the application-neutral packages under [`packages/`](../packages/) supply
+bounded TCP, WebSocket, and reliable ordered RTCDataChannel implementations.
+`weave-node-transport.mjs` re-exports the Node package, while
+`weave-browser.mjs` adds Weave's protocol defaults and relay helpers:
 
 ```js
 import { acceptRelay, connectRelay } from "./weave-browser.mjs";
@@ -139,6 +140,9 @@ directions: `/v1/connect/:alias` dials an allowlisted native target, while
 `/v1/accept` reserves a browser target and pairs it with the next connection
 to a dedicated TCP ingress port. That prefix versions the relay HTTP API, not
 the carried Weave v2 stream. Chrome cannot listen on or dial raw TCP.
+Its byte-transparent WebSocket-to-duplex bridge comes from
+`@weave-net/ws-tcp-gateway`; routing, authentication, target policy, and the
+minimal WebSocket server remain demo integration concerns.
 
 The [`browser-webrtc`](../demos/browser-webrtc/) demo keeps WebRTC signaling
 separate. Its bounded HTTP service exchanges opaque SDP offer/answer and ICE

@@ -34,7 +34,8 @@ run_rust_quality() {
 }
 
 run_js() {
-  "$NODE_BIN" --test js/*.test.mjs demos/*/*.test.mjs
+  "$NODE_BIN" --test js/*.test.mjs demos/*/*.test.mjs packages/*/test/*.test.mjs
+  NODE_BIN="$NODE_BIN" .github/ci/package-smoke.sh
 }
 
 run_go() {

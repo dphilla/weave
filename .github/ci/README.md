@@ -24,6 +24,7 @@ Cargo behavior unless the caller sets that variable too.
 | `cleanup.sh` | Allowlisted manual cleanup; never resets source or arbitrary ignored files |
 | `cleanup.test.sh` | Isolated containment, symlink, dry-run, and scope checks |
 | `run-unit.sh` | Root Rust, JavaScript, Go, and advisory Rust-quality lanes |
+| `package-smoke.sh` | Pack, clean-install, and import every reusable JavaScript workspace |
 | `with-timeout.sh` | Portable process-group timeout and forced cleanup |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
 | `checkpoint-file.sh` | Checkpoint-file → fresh-process restore golden check |
@@ -54,6 +55,9 @@ From the repository root:
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
+
+# Exercise only the publishable package boundary from a clean consumer.
+.github/ci/package-smoke.sh
 
 # See the selected topology without building anything.
 .github/ci/conformance.sh --suite pr --list

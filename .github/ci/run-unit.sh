@@ -15,7 +15,7 @@ usage: .github/ci/run-unit.sh rust|rust-quality|js|go|all
   rust          build and test the root Rust workspace
   rust-quality  report rustfmt/clippy status (advisory until the baseline is clean)
   js            run Node and browser-transport unit tests
-  go            format-check, vet, test, and build the wazero adapter
+  go            format-check, vet, test, and build both Go modules
   all           run rust, js, and go sequentially
 EOF
 }
@@ -40,22 +40,35 @@ run_js() {
 
 run_go() {
   local unformatted build_dir
-  unformatted="$(gofmt -l go/weave-wazero/*.go)"
+  unformatted="$(find go/weave-wazero sidecars/webrtc -type f -name '*.go' -print0 | xargs -0 gofmt -l)"
   if [[ -n "$unformatted" ]]; then
     printf 'gofmt is required for:\n%s\n' "$unformatted" >&2
     return 1
   fi
+
+  for module in go/weave-wazero sidecars/webrtc; do
+    (
+      cd "$module"
+      go vet -mod=readonly ./...
+      if [[ "${WEAVE_CI_GO_RACE:-0}" == 1 ]]; then
+        go test -mod=readonly -race -count=1 ./...
+      else
+        go test -mod=readonly -count=1 ./...
+      fi
+    )
+  done
+
   (
-    cd go/weave-wazero
-    go vet -mod=readonly ./...
-    if [[ "${WEAVE_CI_GO_RACE:-0}" == 1 ]]; then
-      go test -mod=readonly -race -count=1 ./...
-    else
-      go test -mod=readonly -count=1 ./...
-    fi
     build_dir="$(mktemp -d "${TMPDIR:-/tmp}/weave-go-build.XXXXXX")"
     trap 'rm -rf -- "$build_dir"' EXIT
-    go build -mod=readonly -o "$build_dir/weave-wazero" .
+    (
+      cd go/weave-wazero
+      go build -mod=readonly -o "$build_dir/weave-wazero" .
+    )
+    (
+      cd sidecars/webrtc
+      go build -mod=readonly -o "$build_dir/weave-rtc" ./cmd/weave-rtc
+    )
   )
 }
 

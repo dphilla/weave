@@ -25,6 +25,18 @@ bash -n scripts/*.sh
   printf '%s\n' '.github/ci/package-smoke.sh must be executable' >&2
   exit 1
 }
+[[ -x .github/ci/browser-sidecar-smoke.sh ]] || {
+  printf '%s\n' '.github/ci/browser-sidecar-smoke.sh must be executable' >&2
+  exit 1
+}
+[[ -x demos/browser-sidecar/run.sh ]] || {
+  printf '%s\n' 'demos/browser-sidecar/run.sh must be executable' >&2
+  exit 1
+}
+grep -Fxq 'unset WEAVE_CI_ARTIFACT_DIR' .github/ci/qualification.sh || {
+  printf '%s\n' 'qualification.sh must not leak its root artifact override into child lifecycle tests' >&2
+  exit 1
+}
 
 .github/ci/artifact-lifecycle.test.sh
 .github/ci/cleanup.test.sh

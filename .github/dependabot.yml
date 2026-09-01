@@ -7,3 +7,15 @@ updates:
     labels:
       - dependencies
       - ci
+  - package-ecosystem: gomod
+    directory: /go/weave-wazero
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+  - package-ecosystem: gomod
+    directory: /sidecars/webrtc
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies

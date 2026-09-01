@@ -74,6 +74,7 @@ allowed_names=(
   weave-conformance.abc123
   weave-browser-peer.abc123
   weave-browser-peer-abc123
+  weave-browser-sidecar.abc123
   weave-browser-smoke.abc123
   weave-checkpoint.abc123
   weave-native-e2e.abc123
@@ -89,6 +90,8 @@ allowed_names=(
   weave-artifact-lifecycle-test.abc123
   weave-cleanup-test.abc123
   weave-chrome-smoke-abc123
+  weave-sidecar-chrome-abc123
+  weave-sidecar-controller-test-abc123
   weave-webrtc-server-test-abc123
 )
 for name in "${allowed_names[@]}"; do mkdir -p "$TEST_TEMP/$name"; done

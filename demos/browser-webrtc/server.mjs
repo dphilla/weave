@@ -183,6 +183,11 @@ function staticRoutes(wasmPath) {
     ["/weave-browser.mjs", [path.join(REPO_ROOT, "js/weave-browser.mjs"), "text/javascript; charset=utf-8"]],
     ["/packages/browser-transports/src/index.mjs", [path.join(REPO_ROOT, "packages/browser-transports/src/index.mjs"), "text/javascript; charset=utf-8"]],
     ["/packages/webrtc-session/src/index.mjs", [path.join(REPO_ROOT, "packages/webrtc-session/src/index.mjs"), "text/javascript; charset=utf-8"]],
+    ["/sidecar", [path.join(REPO_ROOT, "demos/browser-sidecar/index.html"), "text/html; charset=utf-8"]],
+    ["/sidecar/", [path.join(REPO_ROOT, "demos/browser-sidecar/index.html"), "text/html; charset=utf-8"]],
+    ["/sidecar/index.html", [path.join(REPO_ROOT, "demos/browser-sidecar/index.html"), "text/html; charset=utf-8"]],
+    ["/sidecar/app.mjs", [path.join(REPO_ROOT, "demos/browser-sidecar/app.mjs"), "text/javascript; charset=utf-8"]],
+    ["/sidecar/styles.css", [path.join(HERE, "styles.css"), "text/css; charset=utf-8"]],
     ["/counter.woven.wasm", [wasmPath, "application/wasm"]],
   ]);
 }

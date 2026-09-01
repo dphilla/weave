@@ -6,6 +6,10 @@
 - [`browser-webrtc`](browser-webrtc/) moves a running workload browser A →
   browser B → browser A over direct WebRTC DataChannels; its Node service is
   signaling-only and never carries migration bytes.
+- [`browser-sidecar`](browser-sidecar/) moves a running workload Chrome →
+  Wasmtime → Chrome over two WebRTC DataChannels bridged by the standalone
+  `weave-rtc` sidecar. Wasmtime is unmodified and sees ordinary loopback TCP;
+  the demo controller owns signaling and process policy.
 - [`browser-wamr`](browser-wamr/) runs a woven workload in Chrome, moves it
   to a WAMR server, accepts a WAMR workload back into the tab, and supports a
   Chrome → WAMR → Chrome → WAMR round trip through protocol v2.

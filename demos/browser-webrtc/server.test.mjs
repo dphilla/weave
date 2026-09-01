@@ -77,6 +77,10 @@ test("server exposes only bounded static/config routes", async () => {
     );
     assert.equal(sessionResponse.status, 200);
     assert.match(await sessionResponse.text(), /export class WebRTCSession/);
+    const sidecarPage = await fetch(`${base}/sidecar/`);
+    assert.equal(sidecarPage.status, 200);
+    assert.match(await sidecarPage.text(), /Browser.*Native WebRTC/s);
+    assert.equal((await fetch(`${base}/sidecar/app.mjs`)).status, 200);
     assert.equal((await fetch(`${base}/../../README.md`)).status, 404);
   });
 });

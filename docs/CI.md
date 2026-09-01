@@ -39,9 +39,9 @@ state.
 
 The representative PR route set also includes the exact
 Wasmtime→Node→wazero chain documented in `demos/server-chain`. The real
-browser-peer smoke starts on main/nightly rather than the PR merge path; its
-signaling tests and DataChannel byte-stream tests are still part of the PR
-JavaScript unit lane.
+browser-peer and browser/native-sidecar smokes start on main/nightly rather
+than the PR merge path; their signaling/controller tests and the underlying
+DataChannel/session/sidecar tests remain in the language unit lanes.
 
 This mirrors established systems practice: compiler projects use fast common
 builders plus specialist buildbots, browser projects share one conformance
@@ -87,10 +87,13 @@ on failure. Retention is 7 days for PRs, 30 days for main/nightly/corpus, and
 - Concatenated host-visible stream and diff on divergence.
 
 The browser-peer artifact adds both tab logs/screenshots, selected ICE-path
-diagnostics, and an exact boundary-continuity result. CI supplies only a local
-STUN binding responder for deterministic loopback candidates. A separate
-forced-TURN matrix is still needed before claiming continuous qualification
-through restrictive enterprise/mobile networks.
+diagnostics, and an exact boundary-continuity result. The browser-sidecar
+artifact adds the browser log/screenshot, sidecar control transcript and
+stderr, native runtime/control logs, selected path, and exact continuity at
+both Browser→Wasmtime and Wasmtime→Browser boundaries. CI supplies only a
+local STUN binding responder for deterministic loopback candidates. A
+separate forced-TURN matrix is still needed before claiming continuous
+qualification through restrictive enterprise/mobile networks.
 
 The JavaScript unit lane also packs every workspace under `packages/`, checks
 that its license and public-only file boundary are present, installs all
@@ -132,7 +135,7 @@ the complete behavior and commands.
 2. Make the Rust, JavaScript, Go, and representative conformance jobs branch
    protection requirements. Leave the named Rust-quality job advisory until
    its inherited baseline is repaired.
-3. Let `Main conformance`, including both real-browser routes, pass at least
+3. Let `Main conformance`, including all real-browser routes, pass at least
    once before treating README runtime claims as CI-qualified.
 4. Observe several scheduled runs, then decide whether advisory Go race can
    become required and whether timeouts/iteration counts need tuning.

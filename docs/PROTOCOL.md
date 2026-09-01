@@ -157,6 +157,28 @@ sufficient for the local demo. Cross-network deployments normally add STUN
 discovery and a TURN fallback; a TURN-selected path relays all migration bytes
 and should be budgeted accordingly.
 
+Native applications can terminate the same WebRTC DataChannels in the
+standalone [`weave-rtc`](../sidecars/webrtc/) sidecar. Its versioned NDJSON
+process protocol configures a PeerConnection and maps allowlisted channels to
+one-shot loopback TCP listeners or targets. That control protocol is not a new
+Weave wire version: the sidecar never decodes the byte stream above, and an
+unchanged native runtime still receives protocol-v2 bytes beginning with its
+ordinary `HELLO` frame.
+
+The [`browser-sidecar`](../demos/browser-sidecar/) round trip uses two
+independent channel mappings on one PeerConnection. Browser→native delays its
+loopback dial until the first non-empty DataChannel message so the native
+listener's first-frame deadline starts when `HELLO` is actually available.
+Native→browser uses an ephemeral loopback listener into the already-open
+return DataChannel. This is transport composition only; Weave's
+`PREPARED`/`COMMIT` ownership state machine and state hash are unchanged.
+
+The sidecar supplies no rendezvous or trust policy. Its supervisor is
+responsible for exchanging SDP/ICE, choosing STUN/TURN, authenticating peers,
+authorizing workloads, and protecting the local ingress. Literal loopback
+addresses prevent remote TCP exposure but do not authenticate a same-host
+process.
+
 Protocol v2 does not authenticate or encrypt its native TCP transport. WebRTC
 DataChannels are DTLS-protected, but HTTPS and signaling access control only
 authenticate the signaling service and protect against on-path attackers. A

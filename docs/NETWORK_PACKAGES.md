@@ -1,15 +1,15 @@
 # Reusable networking packages
 
-Weave's JavaScript byte transports, headless WebRTC session, and
-WebSocket-to-duplex bridge are reusable workspace packages. They do not import
-the migration engine, inspect Weave frames, instantiate WebAssembly, or depend
-on a demo.
+Weave's JavaScript byte transports, headless WebRTC session,
+WebSocket-to-duplex bridge, and native WebRTC sidecar are reusable networking
+components. They do not import the migration engine, inspect Weave frames,
+instantiate WebAssembly, or depend on a demo.
 
 The packages are versioned `0.1.0` and can be packed and installed today. They
 are not automatically published to a registry; publication remains a separate
 release decision.
 
-## Package boundaries
+## Component boundaries
 
 | Package | Owns | Deliberately does not own |
 |---|---|---|
@@ -17,10 +17,13 @@ release decision.
 | `@weave-net/webrtc-session` | One fixed-role initial offer/answer, trickled ICE ordering, raw DataChannels, connection lifecycle, and selected-path diagnostics | Signaling transport, rooms, authentication, retry, STUN/TURN provisioning, application channel policy, bytes, media, or renegotiation |
 | `@weave-net/node-transports` | Bounded Node TCP streams, finite dialing, and optional first-byte classification | Application protocols, listeners, routing, admission, or migration |
 | `@weave-net/ws-tcp-gateway` | Byte-transparent, backpressured bridging between a normalized binary WebSocket and a Node duplex | WebSocket handshakes, TCP dialing, routes, target selection, static files, or authentication |
+| `sidecars/webrtc` (`weave-rtc`) | One native Pion PeerConnection, fixed-role offer/answer and trickled ICE, 1–8 policy-declared DataChannels, and binary DataChannel ↔ loopback TCP bridges | Rendezvous, signaling transport, identity, authorization, TURN credential minting, pooling, retry, ICE restart, or application framing |
 
 Every package is dependency-free ESM with TypeScript declarations, an Apache
 2.0 license, explicit Node compatibility metadata, focused tests, and a
-restricted package file list.
+restricted package file list. The sidecar is instead a standalone Go module;
+its Pion dependency is confined to `sidecars/webrtc` and is not linked into any
+Weave runtime adapter or JavaScript package.
 
 ## Shared byte-stream contract
 
@@ -184,6 +187,58 @@ other; manual close is symmetric and idempotent. The bridge never parses or
 reframes payload bytes. A Node stream passed to it must not have `setEncoding()`
 enabled; non-`Uint8Array` chunks terminate the bridge as an endpoint error.
 
+## Native WebRTC sidecar
+
+`weave-rtc` gives any native program a language-neutral WebRTC boundary
+without requiring a Go binding:
+
+```text
+supervisor  -- bounded NDJSON on stdin/stdout -->  weave-rtc
+native app  <------- raw loopback TCP --------->  weave-rtc  <=> DataChannel
+```
+
+One process owns one PeerConnection. Its supervisor selects a fixed
+`offerer` or `answerer` role, supplies the complete ICE configuration, and
+declares one to eight channel mappings before negotiation. Each mapping names
+an expected reliable, ordered, in-band-negotiated DataChannel and either:
+
+- opens a single-admission loopback TCP listener; or
+- dials a literal loopback TCP target.
+
+A dial mapping can connect when its DataChannel opens or on the first
+non-empty binary message. The latter is useful when a channel is negotiated
+early but the local protocol gives a newly accepted connection a short
+first-byte deadline. Zero-length messages are byte-stream no-ops. Text
+DataChannel messages, unexpected labels/protocols, unordered or partially
+reliable channels, and non-loopback mappings are rejected.
+
+The control stream is `webrtc-sidecar.control.v1`: newline-delimited JSON with
+a one-MiB record limit, strict UTF-8/JSON, correlated request IDs, and
+monotonically sequenced events. It carries `start`, WebRTC signal envelopes,
+status, per-channel close, and session close operations. SDP and ICE messages
+are opaque to the supervisor's chosen rendezvous transport; migration or other
+application bytes never enter the control stream. Standard output is protocol
+only and diagnostics go to standard error.
+
+The data bridge accepts binary messages of at most 64 KiB, fragments TCP
+input into at most 16 KiB DataChannel messages, erases message boundaries in
+the other direction, propagates bounded blocking backpressure, and closes both
+ends of a mapping together. Mappings fail and close independently; fatal
+PeerConnection, signaling, or control failures tear down the whole session.
+Both local modes are intentionally one-shot in v0.1.
+
+This boundary is generic: a Rust, C, Go, JavaScript, Python, or shell-adjacent
+supervisor can speak the process protocol, and the bridged bytes could carry a
+streaming or application protocol unrelated to Weave. It is not a generic
+media server: it exposes reliable DataChannels, not audio/video tracks.
+
+Loopback restriction limits accidental network exposure but does not prove
+that the connecting process belongs to the same user. A hostile local process
+can race a listener. Deployments that cross a trust boundary need an
+authenticated local IPC design (for example, a token prelude or an OS-local
+socket with peer credentials) in addition to remote peer identity and
+workload authorization.
+
 ## Weave compatibility layer
 
 Existing imports remain valid:
@@ -213,6 +268,8 @@ packages/
   webrtc-session/
   node-transports/
   ws-tcp-gateway/
+sidecars/
+  webrtc/               independent Go module and control-protocol tests
 .github/ci/
   run-unit.sh
   package-smoke.sh
@@ -240,8 +297,14 @@ clean-consumer check.
 
 ## Current stopping point
 
-The reusable browser layers now stop at raw WebRTC DataChannels and bounded
-byte streams. They do not provide native WebRTC or a process protocol. The next
-separately reviewed milestone is the generic sidecar: a language-independent
-local boundary that lets native runtimes use WebRTC without embedding a full
-ICE/DTLS/SCTP stack in each runtime.
+The reusable layers now extend from browser byte adapters through a headless
+browser session and into a native DataChannel↔TCP sidecar. The sidecar is a
+deliberately small transport primitive, not the universal overlay agent
+described in [`../WEBRTC_OVERLAY.md`](../WEBRTC_OVERLAY.md): it does not own a
+directory, NodeIDs, rendezvous, peer/workload authentication, TURN credential
+provisioning, connection pooling, ICE restart, or migration-aware retry.
+
+Those responsibilities should be added above this boundary as separately
+reviewed components. Host-function/plugin state remains above networking as
+well: WebRTC can move its bytes, but cannot define service compatibility,
+restore semantics, activation, abort, or ownership fencing.

@@ -10,7 +10,7 @@ resumes as if nothing happened.
 
 Verified end-to-end. The native/Node/wazero matrix compares the complete
 host-visible event stream with an uninterrupted golden run; the real Chrome
-smoke checks that the first newly observed event has the exact next counter
+smokes check that the first newly observed event has the exact next counter
 index at every runtime boundary:
 
 | # | scenario | verified |
@@ -26,12 +26,15 @@ index at every runtime boundary:
 | 9 | wasmtime → WAMR → wasmtime, including multiple memories and a cleared active data segment | ✅ |
 | 10 | Chrome → WAMR → Chrome → WAMR through WebSocket↔TCP relay | ✅ |
 | 11 | Chrome A → Chrome B → Chrome A directly over WebRTC DataChannels | ✅ |
+| 12 | Chrome → Wasmtime → Chrome through the generic WebRTC↔TCP sidecar | ✅ |
 
 Run the native/Node/wazero matrix with `./scripts/e2e.sh`. Runnable, verified
 three-runtime server and direct browser-peer examples live in
 [`demos/server-chain`](demos/server-chain/) and
 [`demos/browser-webrtc`](demos/browser-webrtc/); the Chrome/WAMR bridge remains
-in [`demos/browser-wamr`](demos/browser-wamr/).
+in [`demos/browser-wamr`](demos/browser-wamr/). The generic native WebRTC
+sidecar and its Browser ↔ Wasmtime round trip live in
+[`demos/browser-sidecar`](demos/browser-sidecar/).
 
 ## How is that possible?
 
@@ -93,6 +96,7 @@ crates/weave-host        engine-agnostic: page tracker, migration source/target
 crates/weave-wasmtime    wasmtime plugin (poll host fn, instance, serve node)
 crates/weave-cli         `weave` binary: transform/run/checkpoint/restore/serve/migrate
 packages/                reusable byte transports, headless WebRTC session, and gateway core
+sidecars/webrtc/          generic WebRTC DataChannel ↔ loopback TCP process boundary
 js/weave.mjs             plugin for JS runtimes (browser-clean core: standard WebAssembly API)
 js/weave-browser.mjs     Weave defaults and compatibility exports for browser transports
 js/weave-node.mjs        Node.js node runner (TCP transport + CLI)
@@ -108,13 +112,17 @@ scripts/cleanup.sh       safe allowlisted local artifact cleanup shim
 ```
 
 The networking pieces under `packages/` are dependency-free, installable ESM
-packages rather than demo internals. Their public boundaries, examples,
-compatibility shims, and clean-package verification are documented in
+packages rather than demo internals. Native programs can use the standalone
+`weave-rtc` process through a versioned language-neutral control protocol;
+Pion and the Go module that contains it stay isolated under `sidecars/webrtc/`.
+Their public boundaries, examples, compatibility shims, and verification are documented in
 [`docs/NETWORK_PACKAGES.md`](docs/NETWORK_PACKAGES.md).
 
 For a real browser round trip, continue with the
 [`browser ↔ browser WebRTC demo`](demos/browser-webrtc/README.md) or the
-[`Chrome ↔ WAMR demo`](demos/browser-wamr/README.md). The
+[`browser ↔ native sidecar demo`](demos/browser-sidecar/README.md). The
+[`Chrome ↔ WAMR demo`](demos/browser-wamr/README.md) retains the WebSocket
+gateway path. The
 [`three-server chain`](demos/server-chain/README.md) is the shortest verified
 cross-runtime native walkthrough.
 For the required and scheduled verification topology, local replay commands,
@@ -193,6 +201,11 @@ internal state uses SIMD.
   allowlists, quotas, and TLS before exposing signaling or relay endpoints to
   a network. WebRTC encrypts DataChannels but does not authenticate
   application-level migration policy or a malicious signaling service.
+- The native WebRTC sidecar accepts only literal loopback TCP mappings, but a
+  loopback port is not a same-user authentication boundary. Its v0.1 process
+  protocol deliberately does not provide peer identity, workload
+  authorization, rendezvous, TURN credential issuance, or connection pooling;
+  the supervising application must own those policies before network exposure.
 - Incoming modules are capped at 512 MiB in Rust/JS (256 MiB in wazero), and
   aggregate memory accepted at handoff is capped at 1 GiB by default. This is
   not a lifetime cap on later guest `memory.grow` instructions.

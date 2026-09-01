@@ -70,4 +70,6 @@ runs:
       with:
         go-version: ${{ steps.versions.outputs.go }}
         cache: true
-        cache-dependency-path: go/weave-wazero/go.sum
+        cache-dependency-path: |
+          go/weave-wazero/go.sum
+          sidecars/webrtc/go.sum

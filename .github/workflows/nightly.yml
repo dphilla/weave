@@ -99,6 +99,7 @@ jobs:
         with:
           rust: "true"
           node: "true"
+          go: "true"
       - name: Fetch verified WAMR source
         run: |
           .github/ci/prepare-wamr.sh "$RUNNER_TEMP/wasm-micro-runtime" | tee "$RUNNER_TEMP/wamr.env"
@@ -111,6 +112,10 @@ jobs:
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/browser/peer
         run: .github/ci/browser-peer-smoke.sh
+      - name: Run browser/native WebRTC sidecar chain
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/browser/sidecar
+        run: .github/ci/browser-sidecar-smoke.sh
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -35,6 +35,7 @@ Cargo behavior unless the caller sets that variable too.
 | `run-wamr.sh` | Independent WAMR workspace build and tests |
 | `browser-smoke.sh` | Required Chrome → WAMR → Chrome → WAMR smoke |
 | `browser-peer-smoke.sh` | Required Chrome A → B → A WebRTC smoke with local signaling/STUN |
+| `browser-sidecar-smoke.sh` | Required Chrome → generic Pion sidecar → Wasmtime → Chrome smoke |
 | `wamr-fixture.sh` | Multiple-memory Wasmtime → WAMR → Wasmtime chain |
 | `adversity.sh` | Protocol failure tests and repeated migration thresholds |
 | `host-service-baseline.sh` | Current built-in host-service behavior tests |
@@ -141,6 +142,8 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-artifacts \
   .github/ci/browser-smoke.sh
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-peer-artifacts \
   .github/ci/browser-peer-smoke.sh
+WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-sidecar-artifacts \
+  .github/ci/browser-sidecar-smoke.sh
 ```
 
 Missing browser prerequisites are failures in this wrapper. The underlying
@@ -201,19 +204,24 @@ is needed. Go race instrumentation is likewise an advisory nightly job until
 it passes on every supported Go/platform combination.
 
 CI currently qualifies the exact current Node and Go pins in `versions.env`.
-The relay's documented Node 18 floor and the Go module's 1.22 language floor
-are not yet protected by minimum-version jobs; add a scheduled compatibility
-matrix before treating those floors as continuously qualified.
+The relay's documented Node 18 floor, the wazero adapter's Go 1.22 language
+floor, and the WebRTC sidecar's Go 1.24 language floor are not yet protected by
+minimum-version jobs; add a scheduled compatibility matrix before treating
+those floors as continuously qualified.
 
-Real browser-to-browser WebRTC is required on main, nightly, and release
-qualification. The smoke starts an in-process signaling service and a minimal
-loopback STUN binding responder, launches two actual Chrome pages, migrates in
-both directions, and checks the exact next `EMIT` index at each boundary. Its
-artifact contains both page logs and screenshots plus Chrome/tool versions.
-This validates a real same-host DataChannel and exercises local STUN candidate
-gathering; it does not assert that a server-reflexive candidate was selected.
-Separate browsers/network namespaces and forced TURN/UDP and TURN/TCP/TLS
-remain a future scheduled deployment matrix.
+Real browser-to-browser WebRTC and browser-to-native WebRTC through the generic
+sidecar are required on main, nightly, and release qualification. The peer
+smoke launches two actual Chrome pages; the sidecar smoke launches Chrome plus
+the independently built Go/Pion process and an unmodified Wasmtime TCP node.
+Both migrate in both directions and check the exact next `EMIT` index at each
+boundary. The sidecar smoke additionally proves its `first-data` dial remains
+unopened after RTC readiness and opens on the first migration bytes. Artifacts
+retain browser and sidecar selected-path views separately, protocol NDJSON,
+process logs, screenshots, and tool versions. These validate real same-host
+DataChannels and local STUN gathering; they do not assert that a
+server-reflexive candidate was selected. Separate browsers/network namespaces
+and forced TURN/UDP and TURN/TCP/TLS remain a future scheduled deployment
+matrix.
 
 ## Host-service baseline, not a plugin ABI
 

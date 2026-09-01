@@ -202,6 +202,7 @@ is_allowlisted_temp_name() {
     weave-conformance.?* | \
     weave-browser-peer.?* | \
     weave-browser-peer-?* | \
+    weave-browser-sidecar.?* | \
     weave-browser-smoke.?* | \
     weave-checkpoint.?* | \
     weave-native-e2e.?* | \
@@ -215,6 +216,8 @@ is_allowlisted_temp_name() {
     weave-artifact-lifecycle-test.?* | \
     weave-cleanup-test.?* | \
     weave-chrome-smoke-?* | \
+    weave-sidecar-chrome-?* | \
+    weave-sidecar-controller-test-?* | \
     weave-webrtc-server-test-?*) return 0 ;;
     *) return 1 ;;
   esac

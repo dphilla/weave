@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Weave · Browser ↔ Native WebRTC</title>
+    <link rel="stylesheet" href="/sidecar/styles.css">
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <p class="eyebrow">Cross-runtime peer-to-peer migration</p>
+        <h1>Browser <span aria-hidden="true">↔</span> Native WebRTC</h1>
+        <p class="lede">
+          A generic Go/Pion sidecar terminates WebRTC and bridges raw bytes to
+          an unmodified native Weave node over loopback TCP. Signaling carries
+          no migration data.
+        </p>
+      </header>
+
+      <section class="path" aria-label="Migration path">
+        <div><span class="dot peer-a"></span><strong>Chrome</strong><small>WebAssembly API</small></div>
+        <div class="wire"><span>DataChannel</span><i></i></div>
+        <div><span class="dot rtc"></span><strong>Sidecar</strong><small>WebRTC ↔ byte stream</small></div>
+        <div class="wire"><span>loopback TCP</span><i></i></div>
+        <div><span class="dot peer-b"></span><strong>Wasmtime</strong><small>unmodified node</small></div>
+      </section>
+
+      <section class="panel session">
+        <div class="section-heading">
+          <div>
+            <p class="step">Session</p>
+            <h2>Browser offerer</h2>
+          </div>
+          <span id="connection-state" class="badge muted">starting</span>
+        </div>
+        <div class="session-grid">
+          <div>
+            <span class="field-label">Private room ID</span>
+            <code id="room-name"></code>
+          </div>
+          <p class="hint">
+            The controller is peer B. It forwards only offer, answer, and ICE
+            messages between this page and the sidecar process.
+          </p>
+        </div>
+      </section>
+
+      <div class="workspace">
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="step">Workload</p>
+              <h2>Woven counter</h2>
+            </div>
+            <span id="module-state" class="badge muted">loading module</span>
+          </div>
+          <p id="module-detail" class="hint">Loading the generated counter…</p>
+          <div class="fields two">
+            <label>
+              Entry
+              <select id="entry" disabled></select>
+            </label>
+            <label>
+              Iterations
+              <input id="entry-args" value="1000000000" inputmode="numeric" spellcheck="false">
+            </label>
+          </div>
+          <button id="start-workload" class="primary" type="button" disabled>Start in browser</button>
+          <p class="hint">The generated workload starts only once. Each direction has its own one-shot data channel.</p>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div>
+              <p class="step">Ownership</p>
+              <h2>Migration controls</h2>
+            </div>
+            <span id="runtime-state" class="badge idle">idle</span>
+          </div>
+          <div class="direction-card">
+            <div>
+              <strong>Browser → native</strong>
+              <p>Pre-copy the active browser workload through the sidecar to the idle Wasmtime node.</p>
+            </div>
+            <button id="migrate-workload" class="primary" type="button" disabled>Migrate to native</button>
+          </div>
+          <div class="direction-card">
+            <div>
+              <strong>Native → browser</strong>
+              <p>Arm this tab, then run the return command printed by the controller.</p>
+            </div>
+            <button id="arm-target" class="ghost" type="button" disabled>Arm browser target</button>
+            <button id="cancel-target" class="ghost" type="button" hidden>Cancel wait</button>
+          </div>
+          <dl class="metrics">
+            <div><dt>Owner</dt><dd id="metric-owner">none</dd></div>
+            <div><dt>Polls</dt><dd id="metric-polls">0</dd></div>
+            <div><dt>Pages</dt><dd id="metric-pages">0</dd></div>
+            <div><dt>ICE path</dt><dd id="metric-path">not selected</dd></div>
+          </dl>
+        </section>
+      </div>
+
+      <section class="panel console-panel">
+        <div class="section-heading">
+          <div>
+            <p class="step">Trace</p>
+            <h2>Browser event log</h2>
+          </div>
+          <button id="clear-log" class="ghost" type="button">Clear</button>
+        </div>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+
+      <footer>
+        This development demo binds its native bridge to loopback. Internet
+        deployment still needs authenticated signaling, peer identity, STUN,
+        and a TURN fallback.
+      </footer>
+    </main>
+    <script type="module" src="/sidecar/app.mjs"></script>
+  </body>
+</html>

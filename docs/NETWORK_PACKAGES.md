@@ -1,9 +1,9 @@
 # Reusable networking packages
 
-Weave's JavaScript byte transports, headless WebRTC session,
-WebSocket-to-duplex bridge, and native WebRTC sidecar are reusable networking
-components. They do not import the migration engine, inspect Weave frames,
-instantiate WebAssembly, or depend on a demo.
+Weave's JavaScript byte transports, headless WebRTC session, authenticated
+rendezvous primitives, WebSocket-to-duplex bridge, and native WebRTC sidecar
+are reusable networking components. They do not import the migration engine,
+inspect Weave frames, instantiate WebAssembly, or depend on a demo.
 
 The packages are versioned `0.1.0` and can be packed and installed today. They
 are not automatically published to a registry; publication remains a separate
@@ -15,6 +15,7 @@ release decision.
 |---|---|---|
 | `@weave-net/browser-transports` | Bounded WebSocket and reliable ordered RTCDataChannel byte streams | PeerConnection setup, signaling, ICE/TURN, discovery, or application framing |
 | `@weave-net/webrtc-session` | One fixed-role initial offer/answer, trickled ICE ordering, raw DataChannels, connection lifecycle, and selected-path diagnostics | Signaling transport, rooms, authentication, retry, STUN/TURN provisioning, application channel policy, bytes, media, or renegotiation |
+| `@weave-net/authenticated-rendezvous` | Self-certifying Ed25519 NodeIDs, exact issuer-signed connection capabilities, signed/hash-chained signaling records, and replay/session validation | A concrete mailbox transport, hosted service, directory, approval UI, TURN provisioning, WebRTC, application bytes, or media |
 | `@weave-net/node-transports` | Bounded Node TCP streams, finite dialing, and optional first-byte classification | Application protocols, listeners, routing, admission, or migration |
 | `@weave-net/ws-tcp-gateway` | Byte-transparent, backpressured bridging between a normalized binary WebSocket and a Node duplex | WebSocket handshakes, TCP dialing, routes, target selection, static files, or authentication |
 | `sidecars/webrtc` (`weave-rtc`) | One native Pion PeerConnection, fixed-role offer/answer and trickled ICE, 1–8 policy-declared DataChannels, and binary DataChannel ↔ loopback TCP bridges | Rendezvous, signaling transport, identity, authorization, TURN credential minting, pooling, retry, ICE restart, or application framing |
@@ -128,8 +129,71 @@ implement perfect negotiation/glare, renegotiation, ICE restart, multiparty
 topology, media tracks, or negotiated DataChannels. It returns raw channels;
 compose a reliable ordered channel with `@weave-net/browser-transports` when
 an exact byte stream is required. Signaling adapters remain responsible for
-authenticated routing, retry/idempotency, rooms, discovery, and at-most-once
-delivery.
+authenticated routing, retry/idempotency, rooms, and discovery. Raw
+`WebRTCSession.receiveSignal()` callers must deduplicate before delivery;
+`AuthenticatedSession.inbound()` supplies exact-retry suppression when the
+authenticated wrapper is used.
+
+## Authenticated rendezvous
+
+`@weave-net/authenticated-rendezvous` sits between the raw signaling callback
+and any application-supplied mailbox transport:
+
+```text
+WebRTCSession.sendSignal() or weave-rtc signal event
+                         |
+        AuthenticatedSession.outbound()
+                         |
+             serializeSignalEnvelope()
+                         |
+            canonical UTF-8 bytes
+                         |
+       application RendezvousTransport
+                         |
+   AuthenticatedSession.inbound(bytes)
+                         |
+WebRTCSession.receiveSignal() or weave-rtc signal command
+```
+
+V1 derives a stable `wn1-` NodeID from each Ed25519 public key. A locally
+trusted issuer signs one exact, short-lived capability containing both
+NodeIDs, the session, action/resource, application protocol, authorized
+channels, privacy and signaling-visibility modes, limits, actor/delegation
+context, service, and profile. Both endpoints then sign every complete SDP or
+ICE object. Per-sender sequence numbers and predecessor digests make retries,
+forks, and reordering explicit before a signal reaches WebRTC; an omission is
+observable when a later record arrives, but a final withheld record cannot be
+detected by a hash chain alone.
+The first complete offer is atomically reserved by digest. A required
+`enforceSessionPolicy` callback makes the embedding supervisor explicitly
+attest that it applied the signed ICE/TURN path, channel/application scope, and
+live-connection deadline before a session is exposed. The standalone package
+cannot inspect whether that trusted cross-layer assertion is true.
+
+The package includes deterministic canonicalization and encodings, identity,
+capability and signal functions, an authenticated-session state machine, and
+a bounded `InMemoryReplayStore`. Its bounded byte verifiers preserve strict
+canonical-wire evidence that ordinary JSON parsing would erase. It exposes a
+byte-oriented structural `RendezvousTransport` type but deliberately supplies
+no HTTP/WebSocket adapter, message queue, hosted service, directory, issuer
+policy, or TURN broker. The replay store is process-local security state, not
+a rendezvous transport or production persistence layer.
+
+The package also compares every capability field with explicit local policy,
+but it does not inspect SDP, live DataChannels, or application bytes. The
+browser session or native supervisor remains responsible for configuring and
+rejecting actual channels, enforcing the signed application scope, and closing
+the PeerConnection/DataChannels by `session.deadline`. Capability request,
+issuance, and delivery are likewise outside the signal-only transport
+interface.
+
+The same signed message shapes work around browser signaling and a native
+supervisor; no protocol change is required in `@weave-net/webrtc-session`, the
+sidecar protocol, or the application byte stream. Caller-owned orchestration
+and the cross-layer enforcement glue described above are still required. The
+exact language-neutral contract is in
+[`RENDEZVOUS.md`](RENDEZVOUS.md), and the human/agent/media consumption model
+is in [`RENDEZVOUS_CONSUMPTION.md`](RENDEZVOUS_CONSUMPTION.md).
 
 ## Node TCP transport
 
@@ -264,6 +328,7 @@ JavaScript workspace state is centralized:
 package.json
 package-lock.json
 packages/
+  authenticated-rendezvous/
   browser-transports/
   webrtc-session/
   node-transports/
@@ -297,14 +362,15 @@ clean-consumer check.
 
 ## Current stopping point
 
-The reusable layers now extend from browser byte adapters through a headless
-browser session and into a native DataChannel↔TCP sidecar. The sidecar is a
-deliberately small transport primitive, not the universal overlay agent
-described in [`../WEBRTC_OVERLAY.md`](../WEBRTC_OVERLAY.md): it does not own a
-directory, NodeIDs, rendezvous, peer/workload authentication, TURN credential
-provisioning, connection pooling, ICE restart, or migration-aware retry.
+The reusable layers now extend from browser byte adapters through headless
+WebRTC and native sidecar transports to an authenticated, capability-scoped
+rendezvous protocol. The package authenticates records delivered by a
+transport; it is not yet the universal overlay agent described in
+[`../WEBRTC_OVERLAY.md`](../WEBRTC_OVERLAY.md). A concrete bounded mailbox,
+durable replay store, issuer/approval service, directory, TURN provisioning,
+presence, pooling, ICE restart, and agent/CLI/UI projections remain separate
+future increments.
 
-Those responsibilities should be added above this boundary as separately
-reviewed components. Host-function/plugin state remains above networking as
-well: WebRTC can move its bytes, but cannot define service compatibility,
-restore semantics, activation, abort, or ownership fencing.
+Host-function/plugin state remains above networking as well: authenticated
+WebRTC can move its bytes, but cannot define service compatibility, restore
+semantics, activation, abort, or ownership fencing.

@@ -95,7 +95,7 @@ crates/weave-transform   the instrumenting compiler (the heart of Weave)
 crates/weave-host        engine-agnostic: page tracker, migration source/target
 crates/weave-wasmtime    wasmtime plugin (poll host fn, instance, serve node)
 crates/weave-cli         `weave` binary: transform/run/checkpoint/restore/serve/migrate
-packages/                reusable byte transports, headless WebRTC session, and gateway core
+packages/                reusable transports, WebRTC session, authenticated rendezvous, and gateway
 sidecars/webrtc/          generic WebRTC DataChannel ↔ loopback TCP process boundary
 js/weave.mjs             plugin for JS runtimes (browser-clean core: standard WebAssembly API)
 js/weave-browser.mjs     Weave defaults and compatibility exports for browser transports
@@ -117,6 +117,9 @@ packages rather than demo internals. Native programs can use the standalone
 Pion and the Go module that contains it stay isolated under `sidecars/webrtc/`.
 Their public boundaries, examples, compatibility shims, and verification are documented in
 [`docs/NETWORK_PACKAGES.md`](docs/NETWORK_PACKAGES.md).
+The authenticated rendezvous wire contract and its human/agent consumption
+model are documented separately in [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md)
+and [`docs/RENDEZVOUS_CONSUMPTION.md`](docs/RENDEZVOUS_CONSUMPTION.md).
 
 For a real browser round trip, continue with the
 [`browser ↔ browser WebRTC demo`](demos/browser-webrtc/README.md) or the

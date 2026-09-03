@@ -23,9 +23,13 @@ Cargo behavior unless the caller sets that variable too.
 | `artifact-lifecycle.test.sh` | Isolated lifecycle cleanup and retention checks |
 | `cleanup.sh` | Allowlisted manual cleanup; never resets source or arbitrary ignored files |
 | `cleanup.test.sh` | Isolated containment, symlink, dry-run, and scope checks |
+| `awake-guard.sh` | Shared macOS power assertion for long local entry points |
+| `awake-guard.test.sh` | Isolated platform, bypass, argv, and exit-status checks |
 | `run-unit.sh` | Root Rust, JavaScript, Go, and advisory Rust-quality lanes |
 | `package-smoke.sh` | Pack, clean-install, and import every reusable JavaScript workspace |
 | `with-timeout.sh` | Portable process-group timeout and forced cleanup |
+| `wait-for.sh` | Suspend-safe process, output, and event condition waits |
+| `wait-for.test.sh` | Isolated condition success and active-time timeout checks |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
 | `checkpoint-file.sh` | Checkpoint-file → fresh-process restore golden check |
 | `rust-guest.sh` | Out-of-tree Rust/LLVM guest build and Wasmtime→Node migration |
@@ -74,6 +78,26 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
 .github/ci/rust-guest.sh
 ```
 
+### Local power and suspend behavior
+
+On macOS, `qualification.sh` and executing (non-`--list`) invocations of
+`conformance.sh` automatically re-exec once under the built-in
+`caffeinate -i -s`. This prevents idle sleep and, while on AC power, system
+sleep for the command's lifetime without keeping the display awake. The guard
+is centralized in `awake-guard.sh`; qualification's inherited sentinel keeps
+its nested conformance commands from creating more assertions. Set
+`WEAVE_CI_PREVENT_SLEEP=0` to opt out.
+
+A lid close or explicit sleep may override a power assertion. Conformance
+condition waits therefore measure their allowance with Python's monotonic
+uptime clock through `wait-for.sh`, not Bash's wall-clock-based `SECONDS`.
+Time spent suspended does not consume a runtime's active timeout. If wall time
+advances at least two seconds beyond active time, the helper prints a suspend
+notice. The artifact manifest records the selected awake-guard mode.
+
+Hosted Linux runners do not invoke a power utility. Their workflow-level
+timeout remains the outer bound around the suspend-safe per-process limits.
+
 ### Local cleanup
 
 The convenient entry point is the dependency-free source-tree shim; cleanup
@@ -108,8 +132,9 @@ automatically after success and retain it after failure. Set
 diagnostics remain reliable.
 
 Process shutdown remains event-driven: the conformance harness tracks exact
-child PIDs, the timeout helper owns a process group, and the browser harnesses
-close their Chrome/service children in `finally` and signal handlers. Cleanup
+child PIDs, its condition waits use active elapsed time, the timeout helper
+owns a process group, and the browser harnesses close their Chrome/service
+children in `finally` and signal handlers. Cleanup
 does not use `pkill`, and the manual command does not guess which processes
 are safe to terminate. `SIGKILL` and machine loss cannot run an exit handler;
 after confirming no run remains active, use `scripts/cleanup.sh --temp` to

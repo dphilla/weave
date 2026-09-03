@@ -9,6 +9,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
+readonly -a ORIGINAL_ARGS=("$@")
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/awake-guard.sh"
 
 usage() {
   cat <<'EOF'
@@ -41,6 +44,7 @@ Options:
     WEAVE_CI_TIMEOUT_SECONDS     per-process/status timeout (default: 180)
     WEAVE_CI_STATUS_TIMEOUT_SECONDS timeout for one status request (default: 5)
   WEAVE_CI_KEEP_TEMP           retain a default temporary artifact directory
+  WEAVE_CI_PREVENT_SLEEP=0     disable the automatic macOS awake guard
   WEAVE_BIN, WEAVE_WAZERO_BIN, WEAVE_WAMR_BIN, NODE_BIN
 EOF
 }
@@ -172,6 +176,8 @@ if ((list_only)); then
   exit 0
 fi
 
+weave_ci_reexec_awake "$ROOT/.github/ci/conformance.sh" "${ORIGINAL_ARGS[@]}"
+
 created_artifacts=0
 if [[ -n "${WEAVE_CI_ARTIFACT_DIR:-}" ]]; then
   ARTIFACT_DIR="$WEAVE_CI_ARTIFACT_DIR"
@@ -200,6 +206,7 @@ readonly WAMR_BIN="${WEAVE_WAMR_BIN:-$WAMR_CARGO_TARGET/release/weave-wamr}"
 readonly WOVEN="$ARTIFACT_DIR/fixture.woven.wasm"
 readonly GOLDEN="$ARTIFACT_DIR/golden.events"
 readonly TIMEOUT_RUN="$ROOT/.github/ci/with-timeout.sh"
+readonly WAIT_FOR="$ROOT/.github/ci/wait-for.sh"
 
 declare -a MIGRATE_AFTER_BY_HOP=()
 if [[ -n "${WEAVE_CI_MIGRATE_AFTER_EVENTS_BY_HOP:-}" ]]; then
@@ -329,6 +336,7 @@ fi
   if ((needs_wamr)); then printf 'wamr_bin=%s\n' "$WAMR_BIN"; fi
   printf 'runner_image_os=%s\n' "${ImageOS:-local}"
   printf 'runner_image_version=%s\n' "${ImageVersion:-local}"
+  printf 'awake_guard_mode=%s\n' "${WEAVE_CI_AWAKE_MODE:-unknown}"
   printf 'uname=%s\n' "$(uname -a)"
   rustc --version
   cargo --version
@@ -362,42 +370,40 @@ start_node() {
 
 wait_for_status() {
   local address="$1" expected="$2" label="$3"
-  local deadline=$((SECONDS + TIMEOUT_SECONDS)) output=''
-  while ((SECONDS < deadline)); do
-    if output="$("$TIMEOUT_RUN" "$STATUS_TIMEOUT_SECONDS" "$WEAVE_BIN" \
-      status --node "$address" 2>/dev/null)" && [[ "$output" == *"$expected"* ]]; then
-      return 0
-    fi
-    sleep 0.05
-  done
+  local output='' status=0
+  if output="$("$WAIT_FOR" "$TIMEOUT_SECONDS" output-contains "$expected" \
+    "$TIMEOUT_RUN" "$STATUS_TIMEOUT_SECONDS" "$WEAVE_BIN" status --node "$address")"; then
+    return 0
+  else
+    status=$?
+  fi
   printf 'timed out waiting for %s at %s (last status: %s)\n' "$label" "$address" "$output" >&2
-  return 1
+  return "$status"
 }
 
 wait_for_pid() {
-  local pid="$1" label="$2" deadline=$((SECONDS + TIMEOUT_SECONDS)) status=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if ((SECONDS >= deadline)); then
-      printf 'timed out waiting for %s (pid %s)\n' "$label" "$pid" >&2
-      terminate_pid "$pid"
-      return 1
-    fi
-    sleep 0.1
-  done
+  local pid="$1" label="$2" status=0
+  if ! "$WAIT_FOR" "$TIMEOUT_SECONDS" process "$pid"; then
+    printf 'timed out waiting for %s (pid %s; active timeout %ss)\n' \
+      "$label" "$pid" "$TIMEOUT_SECONDS" >&2
+    terminate_pid "$pid"
+    return 1
+  fi
   wait "$pid" || status=$?
   forget_pid "$pid"
   return "$status"
 }
 
 wait_for_events() {
-  local file="$1" minimum="$2" label="$3" deadline=$((SECONDS + TIMEOUT_SECONDS)) count=0
-  while ((SECONDS < deadline)); do
-    count="$(awk '/^EMIT(32|64)? / { count++ } END { print count + 0 }' "$file" 2>/dev/null || printf 0)"
-    if ((count >= minimum)); then return 0; fi
-    sleep 0.02
-  done
+  local file="$1" minimum="$2" label="$3" count=0 status=0
+  if count="$("$WAIT_FOR" "$TIMEOUT_SECONDS" matching-lines \
+    "$file" "$minimum" '^EMIT(32|64)? ')"; then
+    return 0
+  else
+    status=$?
+  fi
   printf 'timed out waiting for %s to emit %s events (saw %s)\n' "$label" "$minimum" "$count" >&2
-  return 1
+  return "$status"
 }
 
 allocate_ports() {

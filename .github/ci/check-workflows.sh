@@ -29,6 +29,14 @@ bash -n scripts/*.sh
   printf '%s\n' '.github/ci/browser-sidecar-smoke.sh must be executable' >&2
   exit 1
 }
+[[ -r .github/ci/awake-guard.sh ]] || {
+  printf '%s\n' '.github/ci/awake-guard.sh must be readable' >&2
+  exit 1
+}
+[[ -x .github/ci/wait-for.sh ]] || {
+  printf '%s\n' '.github/ci/wait-for.sh must be executable' >&2
+  exit 1
+}
 [[ -x demos/browser-sidecar/run.sh ]] || {
   printf '%s\n' 'demos/browser-sidecar/run.sh must be executable' >&2
   exit 1
@@ -40,6 +48,8 @@ grep -Fxq 'unset WEAVE_CI_ARTIFACT_DIR' .github/ci/qualification.sh || {
 
 .github/ci/artifact-lifecycle.test.sh
 .github/ci/cleanup.test.sh
+.github/ci/awake-guard.test.sh
+.github/ci/wait-for.test.sh
 
 server_chain_list="$(demos/server-chain/run.sh --list)"
 [[ "$server_chain_list" == 'route wasmtime:node:wazero' ]] || {

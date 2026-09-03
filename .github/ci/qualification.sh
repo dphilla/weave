@@ -7,9 +7,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/.github/ci/artifact-lifecycle.sh"
+# shellcheck disable=SC1091
+source "$ROOT/.github/ci/awake-guard.sh"
 cd "$ROOT"
 
 [[ -n "${WAMR_ROOT:-}" ]] || { printf '%s\n' 'WAMR_ROOT is required' >&2; exit 1; }
+weave_ci_reexec_awake "$ROOT/.github/ci/qualification.sh" "$@"
 weave_ci_artifacts_init weave-qualification ARTIFACT_ROOT
 # The top-level override has been resolved into ARTIFACT_ROOT. Do not leak it
 # into nested lifecycle self-tests or let child lanes accidentally share one

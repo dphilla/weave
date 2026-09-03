@@ -8,6 +8,10 @@ not depend on the Weave migration protocol:
 - `@weave-net/webrtc-session` owns one headless offer/answer negotiation,
   trickled ICE, raw DataChannel creation, and PeerConnection lifecycle while
   leaving signaling transport and application policy injectable.
+- `@weave-net/authenticated-rendezvous` binds self-certifying Ed25519 NodeIDs,
+  issuer-signed connection capabilities, and peer-signed signaling records to
+  a canonical-byte, replaceable rendezvous transport without importing WebRTC
+  or Weave.
 - `@weave-net/node-transports` adapts Node TCP sockets to the same exact-read,
   ordered-write contract.
 - `@weave-net/ws-tcp-gateway` bridges a normalized binary WebSocket endpoint

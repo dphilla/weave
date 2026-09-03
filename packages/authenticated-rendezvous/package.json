@@ -1,0 +1,43 @@
+{
+  "name": "@weave-net/authenticated-rendezvous",
+  "version": "0.1.0",
+  "description": "Dependency-free authenticated NodeID and capability rendezvous primitives",
+  "type": "module",
+  "main": "./src/index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs",
+      "default": "./src/index.mjs"
+    },
+    "./vectors/v1.json": "./vectors/v1.json"
+  },
+  "files": [
+    "src/index.mjs",
+    "index.d.ts",
+    "vectors/v1.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dphilla/weave.git",
+    "directory": "packages/authenticated-rendezvous"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "webrtc",
+    "rendezvous",
+    "ed25519",
+    "capability",
+    "peer-to-peer"
+  ],
+  "license": "Apache-2.0"
+}

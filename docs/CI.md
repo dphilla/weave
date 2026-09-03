@@ -105,6 +105,20 @@ The manifest values map directly back to local environment variables and
 `conformance.sh --edge/--route`, making a failing job reproducible without
 copying workflow YAML.
 
+## Local power and suspend behavior
+
+Long local qualification and conformance runs automatically hold a macOS
+`caffeinate -i -s` assertion. This leaves display sleep alone while preventing
+idle sleep and AC-powered system sleep. Set `WEAVE_CI_PREVENT_SLEEP=0` to
+disable it. Hosted Linux runners take no platform-specific action.
+
+Forced sleep, including closing a laptop lid, can override that assertion.
+The conformance harness therefore uses active, monotonic deadlines for process
+completion, readiness, and event thresholds. Suspend time no longer turns a
+healthy runtime into a timeout immediately after wake. The investigation that
+motivated this behavior, its evidence, and the recurrence plan are in
+[`WAMR_TIMEOUT_INVESTIGATION.md`](WAMR_TIMEOUT_INVESTIGATION.md).
+
 ## Local cleanup and failure retention
 
 Central runners use one artifact lifecycle: a default temporary directory is

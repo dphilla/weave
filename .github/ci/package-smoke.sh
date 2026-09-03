@@ -52,18 +52,34 @@ cd "$CONSUMER_DIR"
 "$NPM_BIN" install --ignore-scripts --no-audit --no-fund "${packages[@]}" >/dev/null
 
 "$NODE_BIN" --input-type=module -e '
+  const { readFile } = await import("node:fs/promises");
+  const { createRequire } = await import("node:module");
   const browser = await import("@weave-net/browser-transports");
+  const rendezvous = await import("@weave-net/authenticated-rendezvous");
   const webrtc = await import("@weave-net/webrtc-session");
   const node = await import("@weave-net/node-transports");
   const gateway = await import("@weave-net/ws-tcp-gateway");
   for (const [name, value] of [
     ["WebSocketByteStream", browser.WebSocketByteStream],
     ["RTCDataChannelByteStream", browser.RTCDataChannelByteStream],
+    ["generateNodeIdentity", rendezvous.generateNodeIdentity],
+    ["issueConnectionCapability", rendezvous.issueConnectionCapability],
+    ["serializeConnectionCapability", rendezvous.serializeConnectionCapability],
+    ["serializeSignalEnvelope", rendezvous.serializeSignalEnvelope],
+    ["verifyConnectionCapabilityBytes", rendezvous.verifyConnectionCapabilityBytes],
+    ["verifySignalEnvelopeBytes", rendezvous.verifySignalEnvelopeBytes],
+    ["createAuthenticatedSession", rendezvous.createAuthenticatedSession],
     ["WebRTCSession", webrtc.WebRTCSession],
     ["TcpTransport", node.TcpTransport],
     ["bridgeWebSocketToDuplex", gateway.bridgeWebSocketToDuplex],
   ]) {
     if (typeof value !== "function") throw new Error(`missing package export ${name}`);
+  }
+  const vectorPath = createRequire(import.meta.url)
+    .resolve("@weave-net/authenticated-rendezvous/vectors/v1.json");
+  const vector = JSON.parse(await readFile(vectorPath, "utf8"));
+  if (vector.format !== "weave-authenticated-rendezvous-conformance-v1") {
+    throw new Error("invalid or missing authenticated-rendezvous vector");
   }
 '
 

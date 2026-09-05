@@ -177,9 +177,11 @@ boundaries, not gaps):
   migratable);
 - exceptions, GC types, memory64.
 
-Runtime capabilities still have to overlap. The bundled WAMR CLI enables the
-classic interpreter, bulk memory, SIMD, reference types, and multiple
-memories, and currently supplies only the three `env.emit*` sample services.
+Runtime capabilities still have to overlap. The bundled WAMR CLI uses the
+fast interpreter with pinned SIMDe support and checked build-local adaptations
+for indexed multiple-memory operations. It enables bulk memory, SIMD,
+reference types, and multiple memories, and currently supplies only the three
+`env.emit*` sample services.
 Chrome cannot directly start an export with a public `v128` parameter or
 result; use a scalar guest wrapper. It can receive and resume a workload whose
 internal state uses SIMD.
@@ -188,6 +190,15 @@ internal state uses SIMD.
 
 - State moves **bit-exactly** (including NaN payloads); an end-to-end SHA-256
   over the full migrated state gates the resume.
+- Guest memory sizes, declared growth limits, zero-filled growth, and bounds
+  traps are preserved. Weave keeps its private storage beyond the guest's
+  logical memory-0 boundary and moves it when the guest grows. Host imports
+  continue to receive unchanged guest addresses. Physical memory still needs
+  headroom for checkpoint state; a finite-maximum imported primary memory is
+  rejected at transform time because its host-owned capacity cannot be extended.
+- Fresh initialization completes synchronously before an entry starts. The
+  adapters suppress implicit runtime startup exports during instantiation;
+  migration targets execute no guest startup hooks before `COMMIT`.
 - Checkpoints happen at poll sites (function entries + loop back-edges). A
   workload that makes no calls and runs no loops between two points cannot be
   interrupted between them — by construction there is always a poll site on

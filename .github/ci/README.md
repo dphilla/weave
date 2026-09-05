@@ -85,7 +85,8 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
 ### Local power and suspend behavior
 
 On macOS, `qualification.sh`, `semantic-conformance.sh`, and executing
-(non-`--list`) invocations of `conformance.sh` automatically re-exec once under the built-in
+(non-`--list`) invocations of `conformance.sh` automatically re-exec once under
+the built-in
 `caffeinate -i -s`. This prevents idle sleep and, while on AC power, system
 sleep for the command's lifetime without keeping the display awake. The guard
 is centralized in `awake-guard.sh`; qualification's inherited sentinel keeps

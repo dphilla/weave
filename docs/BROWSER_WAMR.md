@@ -13,8 +13,9 @@ A workload is eligible when all of these are true:
 - `weave transform` accepts the module. Shared memories/threads, `externref`,
   exceptions, GC types, and memory64 are currently rejected.
 - Every Wasm feature used by the transformed module is enabled in both Chrome
-  and the WAMR build. The bundled WAMR adapter uses the classic interpreter
-  with bulk memory, SIMD, reference types, and multiple memories enabled.
+  and the WAMR build. The bundled WAMR adapter uses the fast interpreter with
+  pinned SIMDe support and checked build-local adaptations for indexed memory
+  operations, enabling bulk memory, SIMD, reference types, and multiple memories.
 - The workload is single-threaded, with one exported entry call in flight.
 - Every non-`weave.poll` import has an implementation on both peers. Any
   stateful implementation must be a `HostService`, with the same service name

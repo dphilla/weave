@@ -33,12 +33,13 @@ unboundedly long:
   recursion like `fib` checkpointable), or
 - it (transitively) calls any instrumented function — computed as a fixpoint,
   which gives the complementary invariant: **a non-instrumented function can
-  never have an unwind pass through it**, so it needs no machinery at all and
-  is re-encoded verbatim (zero overhead).
+  never have an unwind pass through it**, so it needs no frame spill machinery.
 
 Functions that touch funcref tables/globals or passive segments are *flattened*
 (they need the shadow/gating machinery below) even when they don't need
-checkpoint sites.
+checkpoint sites. Functions using memory 0 are also flattened for logical
+memory bounds and growth, and every tail call is lowered even in a leaf
+caller. Other non-instrumented functions are re-encoded verbatim.
 
 ### 1.2 Flattening + registerization
 
@@ -100,6 +101,17 @@ The shadow stack grows by `memory.grow` and relocates itself (copying live
 frames) on overflow. Frame headers carry the function id; a mismatch traps
 immediately rather than corrupting silently.
 
+Private allocations occupy a suffix of physical memory 0. The region's first
+u32 records the current guest-visible page count; guest `memory.size` reads
+that value, and guest accesses use unsigned, overflow-safe logical bounds.
+Guest `memory.grow` enforces the original declared maximum, grows physical
+memory, shifts the entire private suffix, updates its pointers, and clears the
+new guest pages. Guest addresses and active data-segment offsets remain
+unchanged. This keeps single-memory runtime compatibility without exposing
+checkpoint storage through guest memory instructions. A host-owned imported
+primary memory with a finite maximum is rejected because its capacity cannot
+be changed by transformation; physical allocation failures remain possible.
+
 ### 1.4 Why the snapshot is so small a concept
 
 Everything the guest self-spills lands in linear memory. Mutable globals are
@@ -146,6 +158,7 @@ memory, funcref reference types, SIMD/v128, multiple memories, and tail calls
   without a cross-thread barrier protocol any snapshot could be torn. This is
   a real theorem, not an implementation gap; a future multi-threaded Weave
   would need poll-rendezvous across threads.
+  Atomic instructions on unshared memories are also rejected explicitly.
 - **externref.** An externref is an opaque handle to *host* state; no portable
   serialization can exist by definition. The migratable pattern — i32 handles
   plus a `HostService` that owns and serializes the actual state — is exactly
@@ -197,6 +210,9 @@ JS plugin uses *unwind-yield*: poll requests an unwind on a time slice, the
 host does its async round, then immediately rewinds. Same guest ABI, same
 protocol, different host scheduling — which is the point of putting the
 machinery in the guest.
+Fresh initialization is synchronous and suppresses yield polls until the
+original start completes. Runtime-specific automatic startup exports are
+disabled during instantiation so staging never executes guest code.
 
 Chrome has no raw TCP API. `js/weave-browser.mjs` adapts binary WebSocket
 messages to the same bounded byte-stream interface, and the demo relay bridges

@@ -9,8 +9,8 @@ contains only triggers, permissions, job ordering, and artifact upload wiring.
 
 | Tier | Trigger | Purpose | Workflow |
 |---|---|---|---|
-| Pull request | PRs to `main`, manual dispatch | Language gates, checkpoint-file restore, and a representative directed migration cycle plus chain | `pr.yml` |
-| Main conformance | Every push to `main`, manual dispatch | Language gates, all 16 directed Wasmtime/Node/wazero/WAMR pairs, Rust/LLVM guest, Chrome↔WAMR, and browser↔browser WebRTC | `conformance.yml` |
+| Pull request | PRs to `main`, manual dispatch | Language gates, checkpoint-file restore, representative migration routes, and fixed expected native guest semantics | `pr.yml` |
+| Main conformance | Every push to `main`, manual dispatch | Language gates, all 16 directed runtime pairs, native/WAMR semantic and SIMD routes, Rust/LLVM guest, and browser migration demos | `conformance.yml` |
 | Nightly adversity | Daily, manual dispatch | Protocol failure-path tests, repeated workload-progress thresholds, WAMR multi-memory, both real-browser routes, and host-service baseline | `nightly.yml` |
 | Corpus | Weekly, manual dispatch | Transform and validate valid modules extracted from the official core Wasm testsuite | `weekly-corpus.yml` |
 | Qualification | `v*` tags, manual dispatch | Deterministic non-publishing runtime qualification with long artifact retention | `qualification.yml` |
@@ -19,8 +19,8 @@ The qualification workflow never publishes a release and has only
 `contents: read` permission. A tag indicates a candidate to test, not proof
 that it passed; release publication should wait for this workflow's result.
 It composes units, workflow validation, checkpoint restore, the Rust guest,
-all runtime directions, WAMR/Chrome, browser/WebRTC, host-service baseline,
-and adversity.
+all runtime directions, fixed guest semantics and SIMD state migration,
+WAMR/Chrome, browser/WebRTC, host-service baseline, and adversity.
 It intentionally excludes the floating upstream corpus and the two known-red
 advisory lanes (Rust quality and Go race); inspect their separate recent runs.
 
@@ -42,6 +42,15 @@ Wasmtime→Node→wazero chain documented in `demos/server-chain`. The real
 browser-peer and browser/native-sidecar smokes start on main/nightly rather
 than the PR merge path; their signaling/controller tests and the underlying
 DataChannel/session/sidecar tests remain in the language unit lanes.
+
+[`semantic-conformance.sh`](../.github/ci/semantic-conformance.sh) adds fixed
+expected traces for initialization, memory size/growth/bounds, tail calls, and
+entry results. It checks standalone execution and real migration independently
+of the ordinary woven Wasmtime golden run, so a shared transformer bug cannot
+pass merely by producing the same wrong behavior everywhere. PRs run the
+native lane; main adds WAMR and live SIMD/multiple-memory state. Qualification
+runs both. See the [semantic lane documentation](../.github/ci/README.md#fixed-guest-semantics)
+for commands, fixtures, and replay settings.
 
 This mirrors established systems practice: compiler projects use fast common
 builders plus specialist buildbots, browser projects share one conformance

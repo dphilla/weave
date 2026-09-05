@@ -25,6 +25,11 @@ The module's own imports (host services) are listed in `weave.meta` →
 A woven module must not retain a core Wasm start section. Transformation folds
 the original start into `__weave_init`; every receiving adapter validates this
 before instantiation so a staged target cannot execute before protocol COMMIT.
+Adapters also disable engine-specific automatic invocation of named startup
+exports such as `_start`, `__post_instantiate`, and `__wasm_call_ctors`.
+Those remain ordinary, explicitly callable entries. During synchronous fresh
+initialization, hosts must return zero from `weave.poll`: initialization has
+no suspended entry for `__weave_resume` to continue.
 
 ## Control globals
 
@@ -37,6 +42,24 @@ before instantiation so a staged target cannot execute before protocol COMMIT.
 | `__weave_sp`, `__weave_stack_base`, `__weave_stack_end` | shadow-stack pointers (byte addresses in memory 0) |
 | `__weave_rbase` | base of the weave region (saved globals, segment flags, results area, table shadows) |
 | `__weave_tshN`, `__weave_tshcapN` | per-table shadow array pointer/capacity (present only if the module mutates tables) |
+
+Newly transformed modules initialize `__weave_rbase` to -1; address zero is a
+valid initialized region for a guest that starts with no memory pages. The
+private header at `mem0[__weave_rbase]` stores the guest-visible memory-0 page
+count as a little-endian u32. It is part of the snapshotted memory, with no
+additional control global or wire field. Existing woven modules and their
+snapshots continue to use their own module-defined layout.
+Re-transform original Wasm inputs to obtain the compiler-side corrections;
+existing snapshots remain tied to their original woven module bytes.
+
+Guest memory-0 operations observe the original logical size and maximum, and
+all guest loads, stores, SIMD accesses, and bulk operations check that logical
+boundary. Guest growth moves the complete private suffix upward, updates its
+pointers, and zeroes the newly exposed pages. Host imports use the original
+guest pointer addresses; adapter memory APIs expose physical memory including
+the private suffix so the full state can be captured. Hosts must not directly
+grow that physical memory during guest execution or treat its suffix as guest
+storage. Restore-time physical growth remains part of the recipe below.
 
 ## Results area
 

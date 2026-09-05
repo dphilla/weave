@@ -1,5 +1,11 @@
 # WAMR timeout investigation
 
+This records the September 2 investigation with the then-selected classic
+interpreter. The subsequent correctness fixes switched to fast interpretation
+with pinned SIMDe and build-local indexed-memory adaptations; see
+[`wamr/README.md`](../wamr/README.md). The historical timings below are not a
+performance baseline for that updated configuration.
+
 ## Conclusion
 
 The two retained aggregate qualification failures from September 2, 2026 were
@@ -92,9 +98,9 @@ awake-machine stall:
    the host poll roughly 3.125 million times over 200M iterations.
 5. Measure an atomic no-request fast path and removal of the duplicate WAMR
    module-instance lookup before considering either change for production.
-6. Compare classic and fast WAMR interpreters only after adding a nonzero
-   `memory.grow` multi-memory fixture; that unsupported fast-interpreter path
-   is why the classic interpreter is selected today.
+6. Rebaseline the fast interpreter against the historical classic results.
+   Indexed nonzero `memory.grow` and combined SIMD/multiple-memory fixtures
+   now cover the compatibility paths that originally required classic mode.
 7. Add separate long-lived-node load coverage for module-cache bounds and
    connection-thread pressure. Those production soak concerns are not active
    in `--exit-on-done` conformance processes.

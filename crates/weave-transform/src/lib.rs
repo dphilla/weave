@@ -41,6 +41,7 @@ mod codegen;
 mod emit;
 mod flatten;
 mod module;
+mod memory;
 
 use anyhow::{Context, Result};
 use weave_core::Meta;

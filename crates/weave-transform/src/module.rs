@@ -203,6 +203,20 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
                    consistently checkpointed without stop-the-world across threads");
         }
     }
+    if m.num_imported_memories > 0 && m.memories[0].maximum.is_some() {
+        bail!("unsupported: imported memory 0 with a finite maximum cannot provide private checkpoint storage; define the memory in the module or supply an unbounded memory import");
+    }
+    // Atomic accesses can also occur on unshared memories. They are outside
+    // the supported single-threaded instruction set and must not bypass the
+    // guest bounds enforced around ordinary memory operations.
+    for body in &m.code {
+        let mut operators = body.get_operators_reader()?;
+        while !operators.eof() {
+            if is_atomic(&operators.read()?) {
+                bail!("unsupported: atomic instructions");
+            }
+        }
+    }
     for t in &m.tables {
         let rt = t.element_type;
         if !rt.is_func_ref() {
@@ -238,4 +252,18 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
         // A module with no memory at all gets one added by the transformer.
     }
     Ok(m)
+}
+
+fn is_atomic(op: &wasmparser::Operator<'_>) -> bool {
+    macro_rules! classify {
+        ($( @$proposal:ident $operator:ident $({ $($arg:ident: $ty:ty),* })?
+            => $visit:ident ($($annotation:tt)*))*) => {
+            match op {
+                $(wasmparser::Operator::$operator $({ $($arg: _),* })? =>
+                    stringify!($proposal) == "threads",)*
+                _ => false,
+            }
+        };
+    }
+    wasmparser::for_each_operator!(classify)
 }

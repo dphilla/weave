@@ -419,12 +419,24 @@ impl<'p> Codegen<'p> {
             Ins::Op { op, ins, outs } => {
                 let op = op.clone();
                 let (ins_c, outs_c) = (ins.clone(), outs.clone());
-                for s in &ins_c {
-                    f.instruction(&I::LocalGet(fl.locals.slot_local(*s)));
+                let inputs: Vec<u32> = ins_c.iter().map(|s| fl.locals.slot_local(*s)).collect();
+                crate::memory::emit_checks(f, self.plan, &op, &inputs);
+                for &local in &inputs {
+                    f.instruction(&I::LocalGet(local));
                 }
-                let inst = wasm_encoder::reencode::utils::instruction(remap, op)
-                    .map_err(|e| anyhow::anyhow!("reencode: {e:?}"))?;
-                f.instruction(&inst);
+                match op {
+                    wasmparser::Operator::MemorySize { mem: 0 } => {
+                        crate::memory::emit_size(f, self.plan, 0);
+                    }
+                    wasmparser::Operator::MemoryGrow { mem: 0 } => {
+                        f.instruction(&I::Call(self.plan.memory_grow));
+                    }
+                    _ => {
+                        let inst = wasm_encoder::reencode::utils::instruction(remap, op)
+                            .map_err(|e| anyhow::anyhow!("reencode: {e:?}"))?;
+                        f.instruction(&inst);
+                    }
+                }
                 for s in outs_c.iter().rev() {
                     f.instruction(&I::LocalSet(fl.locals.slot_local(*s)));
                 }
@@ -523,6 +535,9 @@ impl<'p> Codegen<'p> {
                     fl.locals.slot_local(src),
                     fl.locals.slot_local(len),
                 );
+                if mem == 0 {
+                    crate::memory::emit_range_check(f, self.plan, ld, ll);
+                }
                 f.instruction(&I::GlobalGet(self.plan.g_rbase));
                 f.instruction(&I::I32Load8U(memarg(off, 0)));
                 f.instruction(&I::If(BlockType::Empty));
@@ -535,7 +550,7 @@ impl<'p> Codegen<'p> {
                 f.instruction(&I::End);
                 f.instruction(&I::LocalGet(ld));
                 f.instruction(&I::I64ExtendI32U);
-                f.instruction(&I::MemorySize(mem));
+                crate::memory::emit_size(f, self.plan, mem);
                 f.instruction(&I::I64ExtendI32U);
                 f.instruction(&I::I64Const(16));
                 f.instruction(&I::I64Shl);

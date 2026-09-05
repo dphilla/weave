@@ -92,6 +92,8 @@ pub struct Plan {
     pub rehydrate: u32,
     pub init_func: u32,
     pub resume_func: u32,
+    pub memory_grow: u32,
+    pub memory_max: u64,
     pub entries: Vec<EntryPlan>,
     pub helpers: Vec<(HelperKind, u32)>,
     pub tgrow: HashMap<u32, u32>,
@@ -130,6 +132,7 @@ pub struct Plan {
     pub t_tgrow: u32,
     pub t_tfill: u32,
     pub t_3i: u32,
+    pub t_memory_grow: u32,
     pub n_data_orig: u32,
     pub control_globals: Vec<(String, u32)>,
 }
@@ -182,8 +185,12 @@ fn prescan(pm: &ParsedModule<'_>) -> Result<Vec<Prescan>> {
         while !r.eof() {
             match r.read()? {
                 Operator::Loop { .. } => p.has_loop = true,
-                Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
+                Operator::Call { function_index } => {
                     p.callees.insert(function_index);
+                }
+                Operator::ReturnCall { function_index } => {
+                    p.callees.insert(function_index);
+                    p.special = true;
                 }
                 Operator::CallIndirect { .. } | Operator::ReturnCallIndirect { .. } => {
                     p.has_indirect = true;
@@ -227,6 +234,7 @@ fn prescan(pm: &ParsedModule<'_>) -> Result<Vec<Prescan>> {
                     // touches a funcref but is flattened anyway costs nothing.
                     p.special = true;
                 }
+                ref op if crate::memory::needs_rewrite(op) => p.special = true,
                 _ => {}
             }
         }
@@ -384,7 +392,8 @@ impl Plan {
         let rehydrate = base + 4;
         let init_func = base + 5;
         let resume_func = base + 6;
-        let mut next = base + 7;
+        let memory_grow = base + 7;
+        let mut next = base + 8;
 
         let mut entries = Vec::new();
         for e in &pm.exports {
@@ -494,12 +503,14 @@ impl Plan {
         let mut data_flag_off = HashMap::new();
         let mut elem_flag_off = HashMap::new();
         for i in 0..n_data {
-            data_flag_off.insert(i, i);
+            data_flag_off.insert(i, 16 + i);
         }
         for i in 0..n_elem {
-            elem_flag_off.insert(i, n_data + i);
+            elem_flag_off.insert(i, 16 + n_data + i);
         }
-        let mut off = (n_data + n_elem + 15) & !15;
+        // The private header holds the guest-visible memory-0 page count.
+        // It moves with the region and is automatically included in snapshots.
+        let mut off = (16 + n_data + n_elem + 15) & !15;
         // saved mutable globals
         let mut saved_globals = Vec::new();
         for (i, g) in pm.global_types.iter().enumerate() {
@@ -558,6 +569,8 @@ impl Plan {
             rehydrate,
             init_func,
             resume_func,
+            memory_grow,
+            memory_max: pm.memories.first().and_then(|m| m.maximum).unwrap_or(65536),
             entries,
             helpers,
             tgrow,
@@ -595,6 +608,7 @@ impl Plan {
             t_tgrow: pm.types.len() as u32 + 3,
             t_tfill: pm.types.len() as u32 + 4,
             t_3i: pm.types.len() as u32 + 5,
+            t_memory_grow: pm.types.len() as u32 + 6,
             n_data_orig: n_data,
             control_globals,
         })
@@ -642,6 +656,7 @@ pub fn emit(
         [],
     ); // t_tfill
     types.ty().function([ValType::I32, ValType::I32, ValType::I32], []); // t_3i
+    types.ty().function([ValType::I32], [ValType::I32]); // t_memory_grow
     module.section(&types);
 
     // ---- imports ----
@@ -666,6 +681,7 @@ pub fn emit(
     funcs.function(plan.t_void); // rehydrate
     funcs.function(plan.t_void); // init
     funcs.function(plan.t_void); // resume
+    funcs.function(plan.t_memory_grow); // guest memory.grow 0
     for e in &plan.entries {
         let ti = if e.old_func < plan.n_imp {
             pm.imported_funcs[e.old_func as usize].type_idx
@@ -703,8 +719,14 @@ pub fn emit(
     // ---- memories ----
     let mut memories = wasm_encoder::MemorySection::new();
     let n_imported_mems = pm.num_imported_memories as usize;
-    for m in pm.memories.iter().skip(n_imported_mems) {
-        memories.memory(remap.memory_type(*m));
+    for (i, m) in pm.memories.iter().enumerate().skip(n_imported_mems) {
+        let mut physical = remap.memory_type(*m);
+        // The original maximum applies to guest pages, not the private suffix.
+        // Guest memory.grow enforces it independently before physical growth.
+        if i == 0 {
+            physical.maximum = None;
+        }
+        memories.memory(physical);
     }
     if pm.memories.is_empty() {
         memories.memory(wasm_encoder::MemoryType {
@@ -733,7 +755,7 @@ pub fn emit(
     globals.global(i32_mut, &ConstExpr::i32_const(0));
     globals.global(i32_mut, &ConstExpr::i32_const(0));
     globals.global(i32_mut, &ConstExpr::i32_const(0));
-    globals.global(i32_mut, &ConstExpr::i32_const(0));
+    globals.global(i32_mut, &ConstExpr::i32_const(-1)); // rbase: not initialized
     if plan.shadows_enabled {
         for _ in 0..pm.tables.len() * 2 {
             globals.global(i32_mut, &ConstExpr::i32_const(0));
@@ -909,6 +931,7 @@ pub fn emit(
     code.function(&gen_rehydrate(plan, pm));
     code.function(&gen_init(plan, pm, &mut remap)?);
     code.function(&gen_resume(plan)?);
+    code.function(&crate::memory::gen_grow(plan));
     for (e_idx, e) in plan.entries.iter().enumerate() {
         code.function(&gen_wrapper(plan, e, e_idx as u32));
     }
@@ -1219,7 +1242,7 @@ fn gen_init(plan: &Plan, pm: &ParsedModule<'_>, remap: &mut Remap) -> Result<Fun
     let (old, base_idx) = (0, 1);
     // idempotence
     f.instruction(&I::GlobalGet(plan.g_rbase));
-    f.instruction(&I::I32Const(0));
+    f.instruction(&I::I32Const(-1));
     f.instruction(&I::I32Ne);
     f.instruction(&I::If(BlockType::Empty));
     f.instruction(&I::Return);
@@ -1238,6 +1261,9 @@ fn gen_init(plan: &Plan, pm: &ParsedModule<'_>, remap: &mut Remap) -> Result<Fun
     f.instruction(&I::I32Const(16));
     f.instruction(&I::I32Shl);
     f.instruction(&I::GlobalSet(plan.g_rbase));
+    f.instruction(&I::GlobalGet(plan.g_rbase));
+    f.instruction(&I::LocalGet(old));
+    f.instruction(&I::I32Store(memarg(0, 2)));
     // segment flags: active data + active/declared elem segments are
     // "already dropped" per spec semantics.
     for (i, d) in pm.datas.iter().enumerate() {
@@ -1372,6 +1398,9 @@ fn gen_resume(plan: &Plan) -> Result<Function> {
         for r in sc.iter().rev() {
             f.instruction(&I::LocalSet(*r));
         }
+        // A reentrant host callback may have invoked a different entry wrapper.
+        f.instruction(&I::I32Const(e_idx as i32));
+        f.instruction(&I::GlobalSet(plan.g_entry));
         f.instruction(&I::GlobalGet(plan.g_state));
         f.instruction(&I::I32Const(names::STATE_UNWIND));
         f.instruction(&I::I32Eq);
@@ -1412,12 +1441,14 @@ fn gen_wrapper(plan: &Plan, e: &EntryPlan, entry_idx: u32) -> Function {
     for i in (0..e.results.len() as u32).rev() {
         f.instruction(&I::LocalSet(scratch_base + i));
     }
+    // Hosts also use this index to decode completed results. Set it after the
+    // call, since a reentrant host callback may invoke another entry wrapper.
+    f.instruction(&I::I32Const(entry_idx as i32));
+    f.instruction(&I::GlobalSet(plan.g_entry));
     f.instruction(&I::GlobalGet(plan.g_state));
     f.instruction(&I::I32Const(names::STATE_UNWIND));
     f.instruction(&I::I32Eq);
     f.instruction(&I::If(BlockType::Empty));
-    f.instruction(&I::I32Const(entry_idx as i32));
-    f.instruction(&I::GlobalSet(plan.g_entry));
     f.instruction(&I::Call(plan.globals_save));
     f.instruction(&I::I32Const(names::FLAG_UNWOUND));
     f.instruction(&I::GlobalSet(plan.g_flag));

@@ -634,6 +634,7 @@ async function startBrowserWorkload() {
   if (!state.moduleBytes || state.starting || state.runner || state.accepting || state.everStarted) return;
   state.starting = true;
   refreshControls();
+  let runner;
   try {
     const entry = elements.entry.value;
     const args = parseEntryArgs(state.moduleMeta, entry, elements.entryArgs.value);
@@ -642,10 +643,8 @@ async function startBrowserWorkload() {
     await instance.instantiate();
     instance.init();
     state.everStarted = true;
-    state.runner = driveWorkload(instance, entry, args);
-    state.starting = false;
-    refreshControls();
-    await state.runner;
+    runner = driveWorkload(instance, entry, args);
+    state.runner = runner;
   } catch (error) {
     state.location = "none";
     setBadge(elements.runtimeState, "failed", "error");
@@ -656,6 +655,7 @@ async function startBrowserWorkload() {
     state.starting = false;
     refreshControls();
   }
+  return runner;
 }
 
 async function armBrowserTarget() {

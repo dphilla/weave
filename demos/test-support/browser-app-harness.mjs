@@ -37,7 +37,17 @@ class FakeElement extends FakeEventTarget {
   value = "";
   textContent = "";
   className = "";
-  disabled = false;
+  _disabled = false;
+  get disabled() { return this._disabled; }
+  set disabled(value) {
+    const changed = this._disabled !== value;
+    this._disabled = value;
+    // Tests can model a MutationObserver/automation reaction at the same
+    // microtask boundary as an actual DOM attribute change.
+    if (changed && this.listeners.has("disabledchange")) {
+      queueMicrotask(() => this.emit("disabledchange", { disabled: value }));
+    }
+  }
   hidden = false;
   files = [];
   scrollTop = 0;
@@ -105,6 +115,7 @@ export async function loadApp(kind, root = process.env.WEAVE_BROWSER_TEST_ROOT ?
   const acceptances = [];
   const relayAcceptances = [];
   let nextInitError = null;
+  let nextStreamError = null;
 
   class FakeInstance {
     constructor(bytes, services, options) {
@@ -126,6 +137,11 @@ export async function loadApp(kind, root = process.env.WEAVE_BROWSER_TEST_ROOT ?
 
   class FakeStream {
     constructor(channel, options = {}) {
+      if (nextStreamError) {
+        const error = nextStreamError;
+        nextStreamError = null;
+        throw error;
+      }
       Object.assign(this, { channel, signal: options.signal, closed: false });
       streams.push(this);
     }
@@ -224,6 +240,7 @@ export async function loadApp(kind, root = process.env.WEAVE_BROWSER_TEST_ROOT ?
     get control() { return channels.get("control"); },
     pagehide() { context.window.emit("pagehide"); },
     failNextInit(error = new Error("init failed")) { nextInitError = error; },
+    failNextStream(error = new Error("stream construction failed")) { nextStreamError = error; },
     async instantiate(index = 0) { instances[index].instantiation.resolve(); await flush(); },
     async complete(index = 0) {
       instances[index].completion.resolve({ status: "done", results: [7] });

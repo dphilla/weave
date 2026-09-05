@@ -85,10 +85,16 @@ The defaults are deliberately finite:
 | Write timeout | 120 seconds |
 | Classification timeout | 15 seconds |
 
-The socket pauses at the high-water mark and resumes after buffered input falls
-to the low-water mark. Crossing the hard cap or reaching an I/O timeout is a
-terminal failure and destroys the socket. `close()` also destroys the socket;
-it is intentionally not a graceful TCP half-close operation.
+When no pending read needs more input, the socket pauses at the high-water
+mark and resumes after buffered input falls to the low-water mark. An
+incomplete oldest `readExact(size)` temporarily overrides those soft
+thresholds, including resuming an already-paused socket, so valid reads larger
+than `pauseBytes` can finish. Concurrent reads remain FIFO, and the hard receive
+cap is still enforced before accepting each incoming chunk.
+
+Crossing the hard cap or reaching an I/O timeout is a terminal failure and
+destroys the socket. `close()` also destroys the socket; it is intentionally
+not a graceful TCP half-close operation.
 
 Choose limits for the largest record your protocol permits. A single
 `readExact(size)` request cannot exceed `maxBufferedBytes`.

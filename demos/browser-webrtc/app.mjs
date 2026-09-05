@@ -724,6 +724,16 @@ async function driveWorkload(instance, entry, args) {
     if (state.pendingArm?.instance === instance) {
       state.pendingArm.reject(new Error("workload stopped before target was armed"));
     }
+    if (state.outboundStream) {
+      // ACK can queue a stream after the guest's last poll. If it completes
+      // before a migration driver starts, release the peer's armed wait too.
+      if (!migration) {
+        try { controlSend({ type: "cancel-migration", channel: outboundLabel() }); }
+        catch { /* the data channel close also releases the target */ }
+      }
+      // Never let a close handshake delay post-COMMIT source retirement.
+      void closeQuietly(state.outboundStream);
+    }
     state.active = null;
     state.runner = null;
     state.migrationRequested = false;
@@ -762,6 +772,7 @@ async function startWorkload() {
   if (state.starting || elements.startWorkload.disabled) return;
   state.starting = true;
   refreshControls();
+  let runner;
   try {
     const entry = elements.entry.value;
     const args = parseEntryArgs(state.moduleMeta, entry, elements.entryArgs.value);
@@ -770,10 +781,8 @@ async function startWorkload() {
     await instance.instantiate();
     instance.init();
     state.everStarted = true;
-    state.runner = driveWorkload(instance, entry, args);
-    state.starting = false;
-    refreshControls();
-    await state.runner;
+    runner = driveWorkload(instance, entry, args);
+    state.runner = runner;
   } catch (error) {
     state.runner = null;
     state.active = null;
@@ -783,6 +792,7 @@ async function startWorkload() {
     state.starting = false;
     refreshControls();
   }
+  return runner;
 }
 
 async function requestMigration() {

@@ -237,3 +237,99 @@ test("peer: an ACK queued just before control close cannot queue migration", asy
   await app.complete();
   await start;
 });
+
+test("peer: stream-constructor failure cancels the armed target and preserves the runner", async (t) => {
+  const { app, start } = await runningApp("peer");
+  t.after(() => app.dispose());
+  const active = app.state.active;
+  const runner = app.state.runner;
+  app.failNextStream();
+  const request = app.requestMigration();
+  app.control.message({ type: "migration-armed", channel: "a-to-b" });
+  await request;
+  assert.equal(app.state.pendingArm, null);
+  assert.equal(app.timers.capture(10_000).length, 0);
+  assert.equal(app.state.migrationRequested, false);
+  assert.equal(app.state.outboundStream, null);
+  assert.equal(app.state.active, active);
+  assert.equal(app.state.runner, runner);
+  assert.equal(app.elements.runtimeState.textContent, "running");
+  assert.equal(app.control.sent.filter((message) => message.type === "cancel-migration").length, 1);
+  await app.complete();
+  await start;
+});
+
+test("peer: an ACK queued just before pagehide cannot queue migration", async (t) => {
+  const { app, start } = await runningApp("peer");
+  t.after(() => app.dispose());
+  const request = app.requestMigration();
+  app.control.message({ type: "migration-armed", channel: "a-to-b" });
+  app.pagehide();
+  await request;
+  assert.equal(app.state.pendingArm, null);
+  assert.equal(app.timers.capture(10_000).length, 0);
+  assert.equal(app.state.migrationRequested, false);
+  assert.equal(app.state.outboundStream, null);
+  assert.equal(app.streams.length, 0);
+  await app.complete();
+  await start;
+});
+
+test("peer: a cleared timeout callback cannot cancel a successful ACK", async (t) => {
+  const { app, start } = await runningApp("peer");
+  t.after(() => app.dispose());
+  const request = app.requestMigration();
+  const oldTimers = app.timers.capture(10_000);
+  assert.equal(oldTimers.length, 1);
+  app.control.message({ type: "migration-armed", channel: "a-to-b" });
+  for (const timer of oldTimers) timer.callback();
+  await request;
+  assert.equal(app.state.pendingArm, null);
+  assert.equal(app.timers.capture(10_000).length, 0);
+  assert.equal(app.state.migrationRequested, true);
+  assert.equal(app.streams.length, 1);
+  assert.equal(app.elements.runtimeState.textContent, "queued");
+  assert.equal(app.control.sent.filter((message) => message.type === "cancel-migration").length, 0);
+  await app.complete();
+  await start;
+});
+
+test("peer: completion before the next poll closes the queued stream and cancels its target", async (t) => {
+  const { app, start } = await runningApp("peer");
+  t.after(() => app.dispose());
+  const request = app.requestMigration();
+  app.control.message({ type: "migration-armed", channel: "a-to-b" });
+  await request;
+  const stream = app.state.outboundStream;
+  assert.ok(stream);
+  assert.equal(app.state.migrationRequested, true);
+  // No onPoll callback is invoked: the guest finishes before the queued
+  // migration has become a SourceMigration owned by the drive loop.
+  await app.complete();
+  await start;
+  assert.equal(stream.closed, true);
+  assert.equal(app.control.sent.filter((message) => message.type === "cancel-migration").length, 1);
+  assert.equal(app.state.outboundStream, null);
+  assert.equal(app.state.migrationRequested, false);
+  assert.equal(app.elements.runtimeState.textContent, "complete");
+});
+
+test("wamr: retiring an old starter cannot clear the next Start reservation", async (t) => {
+  const { app, start: firstStart } = await runningApp("wamr");
+  t.after(() => app.dispose());
+  let secondStart;
+  // This observer is queued when the drive loop enables the idle controls,
+  // before the old outer Start handler's awaited runner continuation.
+  app.startButton.addEventListener("disabledchange", ({ disabled }) => {
+    if (!disabled && !secondStart) secondStart = app.start();
+  });
+  await app.complete();
+  await firstStart;
+  assert.equal(app.instances.length, 2);
+  assert.equal(app.startButton.disabled, true, "the second instantiation still owns its reservation");
+  const duplicate = app.start();
+  assert.equal(app.instances.length, 2, "the first starter must not unlock a still-pending second start");
+  await app.instantiate(1);
+  await app.complete(1);
+  await Promise.all([secondStart, duplicate]);
+});

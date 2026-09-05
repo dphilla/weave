@@ -1,7 +1,7 @@
 // Bounded TCP byte-stream primitives for Node.js. A socket is paused when
 // unread input reaches the high-water mark and resumed after consumers drain
-// it below the low-water mark. The hard cap prevents an unbounded peer from
-// filling process memory.
+// it below the low-water mark. Incomplete exact reads override these soft
+// thresholds to make progress; the hard receive cap always remains in force.
 
 import net from "node:net";
 
@@ -87,10 +87,16 @@ export class TcpTransport {
 
   _updateFlow() {
     if (this.err) return;
-    if (!this.paused && this.len >= this.pauseBytes) {
-      this.socket.pause();
+    // An exact read cannot drain its buffered prefix until all requested
+    // bytes arrive. Pausing that reader at a soft watermark would deadlock.
+    // readExact() bounds every request, and _onData() still enforces the cap
+    // before retaining any new chunk or satisfying readers.
+    const needsInput = this.waiters.length > 0 && this.len < this.waiters[0].n;
+    if (!this.paused && !needsInput && this.len >= this.pauseBytes) {
+      // Node emits "pause" synchronously; listeners may reenter readExact().
       this.paused = true;
-    } else if (this.paused && this.len <= this.resumeBytes) {
+      this.socket.pause();
+    } else if (this.paused && (needsInput || this.len <= this.resumeBytes)) {
       this.paused = false;
       this.socket.resume();
     }

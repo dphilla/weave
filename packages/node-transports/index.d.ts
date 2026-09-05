@@ -9,9 +9,9 @@ export const DEFAULT_SOCKET_CLASSIFICATION_TIMEOUT_MS: number;
 export interface TcpTransportOptions {
   /** Hard limit for unread bytes retained in memory. Default: 72 MiB. */
   maxBufferedBytes?: number;
-  /** Pause the socket at or above this many unread bytes. Default: 64 MiB. */
+  /** Soft pause threshold; incomplete exact reads override it. Default: 64 MiB. */
   pauseBytes?: number;
-  /** Resume a paused socket at or below this many unread bytes. Default: 32 MiB. */
+  /** Resume at this low-water mark, or when an exact read needs input. Default: 32 MiB. */
   resumeBytes?: number;
   /** Deadline for each exact read, in milliseconds. Default: 120000. */
   readTimeoutMs?: number;

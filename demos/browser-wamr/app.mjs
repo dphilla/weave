@@ -313,6 +313,7 @@ async function startBrowserWorkload() {
   // runner exists, and another Start or incoming Arm must not occupy it.
   state.starting = true;
   refreshControls();
+  let runner;
   try {
     const entry = elements.entry.value;
     const args = parseEntryArgs(state.moduleMeta, entry, elements.entryArgs.value);
@@ -320,10 +321,8 @@ async function startBrowserWorkload() {
     setBadge(elements.runtimeState, "instantiating", "busy");
     await instance.instantiate();
     instance.init();
-    state.runner = driveWorkload(instance, entry, args);
-    state.starting = false;
-    refreshControls();
-    await state.runner;
+    runner = driveWorkload(instance, entry, args);
+    state.runner = runner;
   } catch (error) {
     setBadge(elements.runtimeState, "failed", "error");
     log(`could not start workload: ${error.message}`, "error");
@@ -333,6 +332,9 @@ async function startBrowserWorkload() {
     state.starting = false;
     refreshControls();
   }
+  // Startup cleanup is finished before waiting for the workload: an old
+  // completion must never release a later Start's reservation.
+  return runner;
 }
 
 async function armBrowserTarget() {

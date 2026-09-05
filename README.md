@@ -175,7 +175,7 @@ boundaries, not gaps):
 - **externref state** — opaque host references cannot be serialized by any
   portable mechanism; use i32 handles + a `HostService` (that pattern *is*
   migratable);
-- exceptions, GC types, memory64.
+- exceptions, GC types/instructions, memory64, and 64-bit table indices (`table64`).
 
 Runtime capabilities still have to overlap. The bundled WAMR CLI uses the
 fast interpreter with pinned SIMDe support and checked build-local adaptations

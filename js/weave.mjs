@@ -895,7 +895,7 @@ export class WeaveInstance {
     this.services = services;
     this.yieldMs = opts.yieldMs ?? 50;
     this.lastYield = 0;
-    // poll behavior: "run" | "unwind" | {afterPolls: n}
+    // poll behavior: "run" | "unwind" | "initializing" | {afterPolls: n}
     this.pollMode = "run";
     this.pollCount = 0;
     this.instance = null;
@@ -915,6 +915,7 @@ export class WeaveInstance {
 
   _poll() {
     this.pollCount++;
+    if (this.pollMode === "initializing") return 0;
     if (this.pollMode === "unwind") return 1;
     if (typeof this.pollMode === "object" && "afterPolls" in this.pollMode) {
       if (this.pollMode.afterPolls <= 0) return 1;
@@ -933,7 +934,16 @@ export class WeaveInstance {
   memBytes(i = 0) { return new Uint8Array(this.mem(i).buffer); }
 
   init() {
-    this.ex().__weave_init();
+    // The relocated guest start function must finish before an entry can run.
+    // init() is synchronous, so there is no driver to resume a yielded start;
+    // suppress all polls, including a time slice expiring during initialization.
+    const previousPollMode = this.pollMode;
+    this.pollMode = "initializing";
+    try {
+      this.ex().__weave_init();
+    } finally {
+      this.pollMode = previousPollMode;
+    }
   }
 
   /**

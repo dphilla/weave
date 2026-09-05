@@ -197,6 +197,8 @@ function zeroInitializer(type) {
 }
 
 function wovenModule({
+  functionImports = [],
+  initInstructions = [],
   entries = [],
   actualEntries = entries,
   includeResume = true,
@@ -228,7 +230,12 @@ function wovenModule({
   }
   metaWriter.u16(memories.length);
   for (const name of memories) metaWriter.str(name);
-  metaWriter.u16(0); // imports
+  metaWriter.u16(functionImports.length);
+  for (const imported of functionImports) {
+    metaWriter.str(imported.module).str(imported.name);
+    putMetaTypes(metaWriter, imported.params);
+    putMetaTypes(metaWriter, imported.results);
+  }
   metaWriter.u16(controlGlobals.length);
   for (const name of controlGlobals) metaWriter.str(name);
   const meta = metaWriter.u32(globalsAreaSize).u32(resultsAreaSize).out();
@@ -240,7 +247,8 @@ function wovenModule({
       : []),
     ...actualEntries.map((entry) => ({ ...entry, exported: true })),
   ];
-  const types = functions.flatMap(({ params, results }) => [
+  const signatures = [...functionImports, ...functions];
+  const types = signatures.flatMap(({ params, results }) => [
     0x60,
     ...uleb(params.length),
     ...params.map((type) => CORE_TYPE.get(type)),
@@ -249,11 +257,11 @@ function wovenModule({
   ]);
   const functionSection = [
     ...uleb(functions.length),
-    ...functions.flatMap((_, index) => uleb(index)),
+    ...functions.flatMap((_, index) => uleb(functionImports.length + index)),
   ];
   const exports = [];
   functions.forEach((func, index) => {
-    if (func.exported) exports.push({ name: func.name, kind: 0, index });
+    if (func.exported) exports.push({ name: func.name, kind: 0, index: functionImports.length + index });
   });
   exports.push(...memoryExports.map(({ name, index }) => ({ name, kind: 2, index })));
   exports.push(...globalExports.map(({ name, index }) => ({ name, kind: 3, index })));
@@ -263,14 +271,25 @@ function wovenModule({
   ];
   const codeSection = [
     ...uleb(functions.length),
-    ...functions.flatMap(() => [2, 0, 0x0b]), // no locals; end
+    ...functions.flatMap((_, index) => {
+      const body = [0, ...(index === 0 ? initInstructions : []), 0x0b];
+      return [...uleb(body.length), ...body];
+    }),
   ];
   const custom = [...wasmName("weave.meta"), ...meta];
   const wasmParts = [
     ...HEADER,
-    ...section(1, [...uleb(functions.length), ...types]),
-    ...section(3, functionSection),
+    ...section(1, [...uleb(signatures.length), ...types]),
   ];
+  if (functionImports.length > 0) {
+    wasmParts.push(...section(2, [
+      ...uleb(functionImports.length),
+      ...functionImports.flatMap(({ module, name }, index) => [
+        ...wasmName(module), ...wasmName(name), 0, ...uleb(index),
+      ]),
+    ]));
+  }
+  wasmParts.push(...section(3, functionSection));
   if (memoryCount > 0) {
     wasmParts.push(...section(5, [
       ...uleb(memoryCount),
@@ -298,6 +317,50 @@ function wovenModule({
 function minimalWovenModule() {
   return wovenModule();
 }
+
+test("initialization completes across expired time slices and forced unwind polls", async (t) => {
+  let now = 100;
+  t.mock.method(Date, "now", () => now);
+  const { wasm } = wovenModule({
+    functionImports: [
+      { module: "weave", name: "poll", params: [], results: ["i32"] },
+      { module: "test", name: "tick", params: [], results: [] },
+    ],
+    initInstructions: [
+      0x10, 0, 0x04, 0x40, 0x0f, 0x0b, // if poll(): return
+      0x10, 1,                         // tick advances past the time slice
+      0x10, 0, 0x04, 0x40, 0x0f, 0x0b, // if poll(): return
+      0x41, 42, 0x24, 2,               // publish initialized value in G.entry
+    ],
+  });
+  for (const pollMode of ["run", "unwind", { afterPolls: 0 }]) {
+    const instance = new WeaveInstance(wasm, new Map([["test.tick", {
+      imports: { test: { tick() { now += 25; } } },
+    }]]), { yieldMs: 1 });
+    await instance.instantiate();
+    instance.lastYield = now;
+    instance.pollMode = pollMode;
+    instance.init();
+    assert.equal(instance.g("__weave_entry"), 42, "initialization must reach its final side effect");
+    assert.equal(instance.pollCount, 2);
+    assert.equal(instance.pollMode, pollMode, "restore the caller's exact poll mode");
+    assert.equal(instance._poll(), 1, "normal yield policy resumes after initialization");
+  }
+});
+
+test("initialization restores polling policy when the guest traps", async () => {
+  const { wasm } = wovenModule({
+    functionImports: [{ module: "weave", name: "poll", params: [], results: ["i32"] }],
+    initInstructions: [0x10, 0, 0x1a, 0x00], // poll; drop; unreachable
+  });
+  const instance = new WeaveInstance(wasm, new Map());
+  await instance.instantiate();
+  const pollMode = { afterPolls: 0 };
+  instance.pollMode = pollMode;
+  assert.throws(() => instance.init(), WebAssembly.RuntimeError);
+  assert.equal(instance.pollMode, pollMode);
+  assert.equal(instance._poll(), 1);
+});
 
 function makeNamedTestServices(names, restored = []) {
   return new Map(names.map((name, index) => [name, {

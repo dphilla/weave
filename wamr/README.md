@@ -23,15 +23,27 @@ WAMR_ROOT=/tmp/wamr cargo build --release --manifest-path wamr/Cargo.toml
 ```
 
 `WAMR_ROOT` remains external: no WAMR sources or generated bindings are
-vendored. The build compiles a static interpreter with bulk memory, SIMD,
-reference types, and multiple memories enabled. WAMR 2.4.4's classic
-interpreter is selected because indexed multi-memory growth is incomplete in
-its fast interpreter. On Darwin, WAMR's native stack guard-page optimization
+vendored. The build compiles a static fast interpreter with bulk memory, SIMD,
+reference types, and multiple memories enabled. SIMD uses SIMDe v0.8.2,
+downloaded by CMake at immutable commit
+`71fd833d9666141edcd1d3c109a80e228303d8d7`; the first build needs GitHub access.
+`compat.rs` generates checked adaptations of three WAMR source files in the
+Cargo build directory. These retain memory indices in fast bytecode for scalar
+and SIMD accesses, memory size/growth, and bulk operations, filling WAMR
+2.4.4's fast-interpreter multi-memory gaps. Explicit bounds checks remain
+enabled for every memory. The external pinned checkout is never modified.
+On Darwin, WAMR's native stack guard-page optimization
 is disabled because its `alloca`-based stack walk conflicts with Rust's own
 guard; WAMR's interpreter operand/call-stack bounds checks remain enabled.
 Because the adapter contains a small handwritten C ABI, the build rejects a
 different or unverifiable WAMR tag. Set `WEAVE_WAMR_ALLOW_UNTESTED=1` only
 when deliberately accepting that ABI risk.
+
+Instantiation executes no guest functions. In particular, WAMR's automatic
+`__post_instantiate` and `__wasm_call_ctors` calls are disabled in the generated
+runtime source so incoming workloads cannot run before COMMIT. These exports
+remain available when deliberately invoked, including by a guest entry that
+owns its initialization.
 
 ## Use
 
@@ -100,3 +112,10 @@ as a command-line argument.
 source-cleared active data-segment byte, so a successful migration verifies
 both indexed memory handling and the all-zero target baseline required by
 pre-copy page elision.
+
+`tests/fixtures/simd-multi-memory.wat` combines live SIMD locals, SIMD loads and
+stores in memory 1, independent scalar memories, indexed growth and size, and
+cross-memory copy/fill/init. Adapter tests checkpoint it mid-loop, restore into
+a new instance, and check its result. Separate cases verify indexed SIMD and
+bulk accesses still trap at the memory boundary, and that constructor exports
+remain dormant during fresh and incoming instantiation.

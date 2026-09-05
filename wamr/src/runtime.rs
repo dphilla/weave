@@ -14,6 +14,8 @@ use weave_host::MemRead;
 
 const ERROR_BUF_SIZE: usize = 512;
 pub const DEFAULT_STACK_SIZE: u32 = 1024 * 1024;
+#[cfg(test)]
+pub(crate) static EXECUTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 static WEAVE_MODULE: &[u8] = b"weave\0";
 static ENV_MODULE: &[u8] = b"env\0";
@@ -526,6 +528,8 @@ struct HostState {
     poll: PollState,
     shared: Option<Shared>,
     source_options: SourceOptions,
+    #[cfg(test)]
+    polls_until_checkpoint: Option<usize>,
 }
 
 pub enum TakenPoll {
@@ -605,6 +609,8 @@ impl WamrInstance {
             poll: PollState::Run,
             shared,
             source_options,
+            #[cfg(test)]
+            polls_until_checkpoint: None,
         });
         // SAFETY: host is boxed (stable address) and outlives module_inst.
         unsafe {
@@ -1082,6 +1088,15 @@ fn poll_impl(exec_env: ffi::WasmExecEnv) -> Result<i32> {
     // SAFETY: same callback lifetime; see host_state.
     let host = unsafe { host_state(exec_env) }.ok_or_else(|| anyhow!("missing WAMR host state"))?;
 
+    #[cfg(test)]
+    if let Some(remaining) = host.polls_until_checkpoint.as_mut() {
+        if *remaining == 0 {
+            host.polls_until_checkpoint = None;
+            return Ok(1);
+        }
+        *remaining -= 1;
+    }
+
     if matches!(host.poll, PollState::Run) {
         let target = host
             .shared
@@ -1158,6 +1173,116 @@ unsafe extern "C" fn emit64_native(exec_env: ffi::WasmExecEnv, value: i64) {
 mod tests {
     use super::*;
     use std::borrow::Cow;
+
+    fn woven(wat: &str) -> ModuleImage {
+        let options = weave_transform::TransformOptions {
+            poll_period: 1,
+            ..Default::default()
+        };
+        ModuleImage::parse(
+            weave_transform::transform(&wat::parse_str(wat).unwrap(), &options)
+                .unwrap()
+                .wasm,
+        )
+        .unwrap()
+    }
+
+    fn instance(image: ModuleImage) -> WamrInstance {
+        WamrInstance::instantiate(image, DEFAULT_STACK_SIZE, None, SourceOptions::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn implicit_constructor_exports_do_not_execute_when_fresh_or_staged() {
+        let _serial = EXECUTION_LOCK.lock().unwrap();
+        crate::with_wamr(|| {
+            for constructor in ["__post_instantiate", "__wasm_call_ctors"] {
+                let image = woven(&format!(r#"(module
+                  (global $g (mut i32) (i32.const 0))
+                  (func (export "run") (result i32) (global.get $g))
+                  (func (export "{constructor}") (global.set $g (i32.const 7))))"#));
+                let mut fresh = instance(image.clone());
+                fresh.initialize_fresh()?;
+                assert!(matches!(fresh.call_entry("run", &[])?, WorkResult::Done(values) if values[0].as_i32() == 0));
+                // Constructor exports remain callable when intentionally selected.
+                fresh.call_entry(constructor, &[])?;
+                assert!(matches!(fresh.call_entry("run", &[])?, WorkResult::Done(values) if values[0].as_i32() == 7));
+                drop(fresh);
+
+                // A constructor trap must not run while staging an incoming
+                // module, before the target has received even its first page.
+                let trapped = woven(&format!(r#"(module
+                  (func (export "run"))
+                  (func (export "{constructor}") unreachable))"#));
+                let mut staged = instance(trapped);
+                staged.prepare_restore()?;
+                drop(staged);
+            }
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn simd_and_indexed_memories_survive_checkpoint_restore() {
+        let _serial = EXECUTION_LOCK.lock().unwrap();
+        crate::with_wamr(|| {
+            let image = woven(include_str!("../tests/fixtures/simd-multi-memory.wat"));
+            let mut source = instance(image.clone());
+            source.initialize_fresh()?;
+            source.host.polls_until_checkpoint = Some(3);
+            assert!(matches!(
+                source.call_entry("run", &[Val::i32(7)])?,
+                WorkResult::Unwound
+            ));
+            let globals = source.capture_globals()?;
+            let services = source.snapshot_services();
+            let view = source.mem_view();
+            let memories: Vec<Vec<u8>> = (0..view.n_mems())
+                .map(|index| {
+                    let mut bytes = vec![0; view.size(index)];
+                    view.read(index, 0, &mut bytes);
+                    bytes
+                })
+                .collect();
+            drop(source);
+            let mut target = instance(image);
+            target.prepare_restore()?;
+            for (index, memory) in memories.iter().enumerate() {
+                target.set_mem_pages(index, (memory.len() / 65536) as u64)?;
+                for (page, bytes) in memory.chunks_exact(WPAGE_SIZE).enumerate() {
+                    target.write_mem(index, page * WPAGE_SIZE, bytes)?;
+                }
+            }
+            for (name, value) in globals {
+                target.set_global_i32(&name, value)?;
+            }
+            target.restore_services(&services)?;
+            assert!(
+                matches!(target.resume()?, WorkResult::Done(values) if values[0].as_i32() == 205)
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn indexed_simd_and_bulk_accesses_keep_bounds_checks() {
+        let _serial = EXECUTION_LOCK.lock().unwrap();
+        crate::with_wamr(|| {
+            let image = woven(include_str!("../tests/fixtures/simd-multi-memory.wat"));
+            for entry in ["simd_oob", "copy_oob", "fill_oob"] {
+                let mut fresh = instance(image.clone());
+                fresh.initialize_fresh()?;
+                let error = fresh.call_entry(entry, &[]).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("out of bounds"),
+                    "{entry}: {error:#}"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
     use wasm_encoder::{
         CodeSection, ConstExpr, CustomSection, ExportKind, ExportSection, Function,
         FunctionSection, GlobalSection, GlobalType, Instruction, MemorySection, MemoryType, Module,

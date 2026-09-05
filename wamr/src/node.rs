@@ -438,6 +438,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn abort_before_commit_keeps_constructor_exports_dormant() {
+        let _serial = crate::runtime::EXECUTION_LOCK.lock().unwrap();
+        crate::with_wamr(|| {
+            for constructor in ["__post_instantiate", "__wasm_call_ctors"] {
+                let wasm = wat::parse_str(format!(
+                    r#"(module
+                  (import "env" "emit32" (func $emit32 (param i32)))
+                  (func (export "run"))
+                  (func (export "{constructor}") (call $emit32 (i32.const 7)) unreachable))"#
+                ))?;
+                let image = ModuleImage::parse(
+                    weave_transform::transform(&wasm, &Default::default())?.wasm,
+                )?;
+                let listener = TcpListener::bind("127.0.0.1:0")?;
+                let address = listener.local_addr()?.to_string();
+                let source = std::thread::spawn(move || -> Result<()> {
+                    // connect returns only after MODULE_OK: the target must
+                    // instantiate successfully despite its trapping export.
+                    let migration = weave_host::source::SourceMigration::connect(
+                        &address,
+                        "test-source",
+                        &image.wasm,
+                        &image.meta_bytes,
+                        image.meta.memories.len(),
+                        SourceOptions::default(),
+                    )?;
+                    migration.abort(73, "deliberate pre-commit cancellation");
+                    Ok(())
+                });
+                let (connection, _) = listener.accept()?;
+                let mut cache = HashMap::new();
+                let mut target = TargetDriver {
+                    module_cache: &mut cache,
+                    instance: None,
+                    shared: SharedControl::new(true),
+                    stack_size: crate::runtime::DEFAULT_STACK_SIZE,
+                    source_options: SourceOptions::default(),
+                    max_memory_bytes: weave_host::target::DEFAULT_MAX_MEMORY_BYTES,
+                };
+                let error = match run_target_session(connection, &mut target) {
+                    Ok(_) => bail!("target accepted a cancelled migration"),
+                    Err(error) => error,
+                };
+                source.join().expect("source control thread panicked")?;
+                assert!(
+                    format!("{error:#}").contains("source aborted (73)"),
+                    "{error:#}"
+                );
+                let staged = target
+                    .instance
+                    .as_ref()
+                    .expect("target must have staged an instance");
+                for (_, service) in staged.snapshot_services() {
+                    assert_eq!(service, vec![0; 16]);
+                }
+                // Dropping the uncommitted instance never invokes its entry.
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn accepted_connections_receive_an_admission_timeout() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();

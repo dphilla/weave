@@ -2,6 +2,8 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod compat;
+
 const PINNED_WAMR: &str = include_str!("WAMR_VERSION");
 
 fn run(command: &mut Command, what: &str) {
@@ -16,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=WEAVE_WAMR_ALLOW_UNTESTED");
     println!("cargo:rerun-if-changed=CMakeLists.txt");
     println!("cargo:rerun-if-changed=WAMR_VERSION");
+    println!("cargo:rerun-if-changed=compat.rs");
 
     let root = PathBuf::from(env::var_os("WAMR_ROOT").unwrap_or_else(|| {
         panic!(
@@ -36,6 +39,8 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let build = out.join("wamr-build");
     let install = out.join("wamr-install");
+    let patched = out.join("weave-wamr-compat");
+    compat::prepare(&root, &patched);
 
     run(
         Command::new("cmake")
@@ -44,6 +49,7 @@ fn main() {
             .arg("-B")
             .arg(&build)
             .arg(format!("-DWAMR_ROOT_DIR={}", root.display()))
+            .arg(format!("-DWEAVE_WAMR_COMPAT_DIR={}", patched.display()))
             .arg(format!("-DCMAKE_INSTALL_PREFIX={}", install.display()))
             .arg("-DCMAKE_BUILD_TYPE=Release"),
         "WAMR CMake configure",

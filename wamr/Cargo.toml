@@ -14,6 +14,8 @@ weave-host = { path = "../crates/weave-host" }
 
 [dev-dependencies]
 wasm-encoder = "0.227"
+wat = "1"
+weave-transform = { path = "../crates/weave-transform" }
 
 # Keep the adapter independently buildable without changing the root workspace.
 [workspace]

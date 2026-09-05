@@ -12,7 +12,7 @@
 
 use crate::sha256::Sha256;
 use crate::types::*;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 const MAGIC: &[u8; 4] = b"WVSN";
 
@@ -65,8 +65,18 @@ impl StateHasher {
     pub fn services(&mut self, services: &[(String, Vec<u8>)]) {
         let mut svcs: Vec<_> = services.iter().collect();
         svcs.sort_by(|a, b| a.0.cmp(&b.0));
-        self.h.update(&(svcs.len() as u32).to_le_bytes());
-        for (name, blob) in svcs {
+        self.services_in_order(
+            svcs.into_iter()
+                .map(|(name, blob)| (name.as_str(), blob.as_slice())),
+        );
+    }
+
+    fn services_in_order<'a>(
+        &mut self,
+        services: impl ExactSizeIterator<Item = (&'a str, &'a [u8])>,
+    ) {
+        self.h.update(&(services.len() as u32).to_le_bytes());
+        for (name, blob) in services {
             self.h.update(&(name.len() as u32).to_le_bytes());
             self.h.update(name.as_bytes());
             self.h.update(&(blob.len() as u64).to_le_bytes());
@@ -115,6 +125,10 @@ impl Snapshot {
         out
     }
 
+    /// Decode an input-sized snapshot. Collection counts are bounded by their
+    /// minimum encoded sizes before reservation, and decoder allocations are
+    /// fallible. Callers should still bound the file/input size to their own
+    /// resource budget before reading it into memory.
     pub fn decode(buf: &[u8]) -> Result<Snapshot> {
         let mut pos = 0usize;
         if buf.len() < 6 || &buf[..4] != MAGIC {
@@ -131,40 +145,62 @@ impl Snapshot {
         let mut module_hash = [0u8; 32];
         module_hash.copy_from_slice(&buf[pos..pos + 32]);
         pos += 32;
-        let n_mems = get_u32(buf, &mut pos)? as usize;
-        let mut memories = Vec::with_capacity(n_mems);
+        // The checksum is never available to satisfy a declared count or
+        // length. Three collection counts must remain after the header.
+        let payload_end = buf
+            .len()
+            .checked_sub(32)
+            .filter(|end| end.saturating_sub(pos) >= 12)
+            .ok_or_else(|| anyhow::anyhow!("snapshot: truncated counts or state hash"))?;
+        let payload = &buf[..payload_end];
+        let n_mems = snapshot_count(payload, &mut pos, 8, "memories")?;
+        let mut memories = snapshot_vec(n_mems)?;
         for _ in 0..n_mems {
-            let len = usize::try_from(get_u64(buf, &mut pos)?)
+            let len = usize::try_from(get_u64(payload, &mut pos)?)
                 .map_err(|_| anyhow::anyhow!("snapshot: memory length does not fit host"))?;
-            let end = pos
-                .checked_add(len)
-                .filter(|end| *end <= buf.len())
-                .ok_or_else(|| anyhow::anyhow!("snapshot: truncated memory"))?;
-            memories.push(buf[pos..end].to_vec());
-            pos = end;
+            memories.push(snapshot_copy(snapshot_slice(payload, &mut pos, len)?)?);
         }
-        let n_globals = get_u32(buf, &mut pos)? as usize;
-        let mut globals = Vec::with_capacity(n_globals);
+        let n_globals = snapshot_count(payload, &mut pos, 4, "globals")?;
+        let mut globals = snapshot_vec(n_globals)?;
         for _ in 0..n_globals {
-            let name = get_str(buf, &mut pos)?;
-            let v = get_u32(buf, &mut pos)? as i32;
+            let name = snapshot_name(payload, &mut pos)?;
+            let v = get_u32(payload, &mut pos)? as i32;
             globals.push((name, v));
         }
-        let n_svcs = get_u32(buf, &mut pos)? as usize;
-        let mut services = Vec::with_capacity(n_svcs);
+        let n_svcs = snapshot_count(payload, &mut pos, 0, "services")?;
+        let mut services = snapshot_vec(n_svcs)?;
         for _ in 0..n_svcs {
-            let name = get_str(buf, &mut pos)?;
-            let blob = get_bytes(buf, &mut pos)?;
+            let name = snapshot_name(payload, &mut pos)?;
+            let len = get_u32(payload, &mut pos)? as usize;
+            let blob = snapshot_copy(snapshot_slice(payload, &mut pos, len)?)?;
             services.push((name, blob));
         }
-        if buf.len() < pos + 32 {
-            bail!("snapshot: truncated state hash");
-        }
-        let mut expect = [0u8; 32];
-        expect.copy_from_slice(&buf[pos..pos + 32]);
-        pos += 32;
-        if pos != buf.len() {
+        if pos != payload_end {
             bail!("snapshot: trailing bytes");
+        }
+
+        // Hashing service state normally sorts a temporary list. Reserve that
+        // list fallibly too, and use an allocation-free sort. The index tie
+        // breaker preserves the stable ordering of duplicate names used by
+        // StateHasher::services without mutating the decoded snapshot.
+        let mut order = snapshot_vec(n_svcs)?;
+        order.extend(services.iter().enumerate());
+        order.sort_unstable_by(|(a_index, a), (b_index, b)| {
+            a.0.cmp(&b.0).then(a_index.cmp(b_index))
+        });
+        let mut hash = StateHasher::new(n_mems as u32);
+        for memory in &memories {
+            hash.mem_begin(memory.len() as u64);
+            hash.mem_chunk(memory);
+        }
+        hash.globals(&globals);
+        hash.services_in_order(
+            order
+                .into_iter()
+                .map(|(_, (name, blob))| (name.as_str(), blob.as_slice())),
+        );
+        if hash.finish() != buf[payload_end..] {
+            bail!("snapshot: state hash mismatch (corrupt snapshot)");
         }
         let snap = Snapshot {
             module_hash,
@@ -172,11 +208,53 @@ impl Snapshot {
             globals,
             services,
         };
-        if snap.state_hash() != expect {
-            bail!("snapshot: state hash mismatch (corrupt snapshot)");
-        }
         Ok(snap)
     }
+}
+
+/// Every collection item needs at least eight encoded bytes: a memory's u64
+/// length, a global's name length plus value, or a service's two lengths.
+/// Reserve the remaining collection headers as well as bounding by the input.
+fn snapshot_count(buf: &[u8], pos: &mut usize, tail: usize, kind: &str) -> Result<usize> {
+    let count = get_u32(buf, pos)? as usize;
+    let available = buf.len().saturating_sub(*pos);
+    if available < tail || count > (available - tail) / 8 {
+        bail!("snapshot: {kind} count exceeds remaining input");
+    }
+    Ok(count)
+}
+
+fn snapshot_vec<T>(capacity: usize) -> Result<Vec<T>> {
+    let mut out = Vec::new();
+    out.try_reserve_exact(capacity)
+        .context("snapshot: allocation failed")?;
+    Ok(out)
+}
+
+fn snapshot_slice<'a>(buf: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]> {
+    let end = pos
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .ok_or_else(|| anyhow::anyhow!("snapshot: truncated field"))?;
+    let bytes = &buf[*pos..end];
+    *pos = end;
+    Ok(bytes)
+}
+
+fn snapshot_copy(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut out = snapshot_vec(bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(out)
+}
+
+fn snapshot_name(buf: &[u8], pos: &mut usize) -> Result<String> {
+    let len = get_u32(buf, pos)? as usize;
+    let name = std::str::from_utf8(snapshot_slice(buf, pos, len)?)?;
+    let mut out = String::new();
+    out.try_reserve_exact(name.len())
+        .context("snapshot: allocating name failed")?;
+    out.push_str(name);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -201,5 +279,52 @@ mod tests {
         let mid = corrupt.len() / 2;
         corrupt[mid] ^= 0xff;
         assert!(Snapshot::decode(&corrupt).is_err());
+    }
+
+    #[test]
+    fn empty_and_unsorted_services_keep_the_snapshot_format() {
+        let mut snap = Snapshot {
+            module_hash: [0; 32],
+            memories: vec![],
+            globals: vec![],
+            services: vec![],
+        };
+        assert_eq!(Snapshot::decode(&snap.encode()).unwrap(), snap);
+        snap.memories = vec![vec![], vec![]];
+        snap.globals = vec![("".into(), -1), ("日本語".into(), i32::MIN)];
+        // Preserve input order, including equal names, while hashing in stable
+        // UTF-8 name order exactly as the existing format specifies.
+        snap.services = vec![
+            ("z".into(), vec![1]),
+            ("".into(), vec![]),
+            ("é".into(), vec![2, 3]),
+            ("z".into(), vec![4]),
+        ];
+        assert_eq!(Snapshot::decode(&snap.encode()).unwrap(), snap);
+    }
+
+    #[test]
+    fn truncation_trailing_data_and_invalid_utf8_reject() {
+        let snap = Snapshot {
+            module_hash: [3; 32],
+            memories: vec![vec![4; 17]],
+            globals: vec![("g".into(), 7)],
+            services: vec![("s".into(), vec![8; 11])],
+        };
+        let bytes = snap.encode();
+        for end in 0..bytes.len() {
+            assert!(Snapshot::decode(&bytes[..end]).is_err(), "prefix {end}");
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(Snapshot::decode(&trailing).is_err());
+        let mut invalid_name = bytes;
+        invalid_name[38 + 4 + 8 + 17 + 4 + 4] = 0xff;
+        assert!(Snapshot::decode(&invalid_name).is_err());
+    }
+
+    #[test]
+    fn fallible_reservation_reports_capacity_overflow() {
+        assert!(snapshot_vec::<u64>(usize::MAX).is_err());
     }
 }

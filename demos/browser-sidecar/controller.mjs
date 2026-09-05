@@ -14,6 +14,7 @@ import { startServer } from "../browser-webrtc/server.mjs";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "../..");
 const DEFAULT_TIMEOUT_MS = 90_000;
+const SHUTDOWN_TIMEOUT_MS = 2_000;
 const MAX_CONTROL_BYTES = 1024 * 1024;
 const CONTROL_DECODER = new TextDecoder("utf-8", { fatal: true });
 
@@ -99,6 +100,20 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function withDeadline(operation, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function randomId() {
   return crypto.randomBytes(18).toString("base64url");
 }
@@ -148,19 +163,29 @@ function spawnLogged(name, command, args, { echo = false, stdout = true, stderr 
 }
 
 async function terminate(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null || !child.pid) return;
   const signal = (name) => {
     try {
       if (process.platform !== "win32" && child.pid) process.kill(-child.pid, name);
       else child.kill(name);
     } catch { /* process exited concurrently */ }
   };
-  signal("SIGTERM");
-  const exited = await Promise.race([
-    new Promise((resolve) => child.once("exit", () => resolve(true))),
-    delay(2_000).then(() => false),
-  ]);
-  if (!exited) signal("SIGKILL");
+  let onExit;
+  const exited = new Promise((resolve) => {
+    onExit = resolve;
+    child.once("exit", onExit);
+  });
+  try {
+    signal("SIGTERM");
+    try {
+      await withDeadline(exited, SHUTDOWN_TIMEOUT_MS, "child did not exit after SIGTERM");
+    } catch {
+      signal("SIGKILL");
+      await withDeadline(exited, SHUTDOWN_TIMEOUT_MS, `child ${child.pid} did not exit after SIGKILL`);
+    }
+  } finally {
+    child.removeListener("exit", onExit);
+  }
 }
 
 async function waitFor(description, predicate, timeoutMs, details = () => "") {
@@ -222,24 +247,39 @@ export class SidecarClient {
     this.error = null;
     this.onEvent = null;
     this.onFatal = null;
+    this.readyReceived = false;
+    this.closing = null;
     this.ready = new Promise((resolve, reject) => {
       this.resolveReady = resolve;
       this.rejectReady = reject;
     });
+    // Failure can arrive before the caller has installed its startup waiter.
+    void this.ready.catch(() => {});
+    this.readyTimer = setTimeout(() => {
+      this.fail(new Error(`sidecar ready timed out after ${this.timeoutMs} ms`));
+    }, this.timeoutMs);
     this.closed = new Promise((resolve) => { this.resolveClosed = resolve; });
+    // A failed write emits a Socket error as well as invoking its callback.
+    // Handling only the callback still leaves an uncaught EPIPE event.
+    this.child.stdin.on("error", (error) => this.fail(error));
+    this.child.stdout.on("error", (error) => this.fail(error));
     this.child.stdout.on("data", (chunk) => this.ingest(chunk));
     this.child.stdout.on("end", () => {
       if (this.output.length > 0) this.fail(new Error("sidecar stdout ended with a partial control record"));
     });
     this.child.once("exit", (code, signal) => {
-      const result = { code, signal };
       if (!this.error && code !== 0) this.fail(new Error(`sidecar exited with ${code ?? signal}`));
+      if (!this.readyReceived && !this.error) this.fail(new Error("sidecar exited before ready"));
       for (const pending of this.pending.values()) {
         clearTimeout(pending.timer);
         pending.reject(this.error ?? new Error("sidecar exited before replying"));
       }
       this.pending.clear();
-      this.resolveClosed(result);
+    });
+    // `close` also fires on spawn failure, when there is no `exit` event.
+    this.child.once("close", (code, signal) => {
+      clearTimeout(this.readyTimer);
+      this.resolveClosed({ code, signal });
     });
   }
 
@@ -288,6 +328,8 @@ export class SidecarClient {
         this.fail(new Error(`unsupported sidecar protocol ${record.protocol}`));
         return;
       }
+      this.readyReceived = true;
+      clearTimeout(this.readyTimer);
       this.resolveReady(record);
       return;
     }
@@ -316,6 +358,7 @@ export class SidecarClient {
 
   fail(value) {
     if (this.error) return;
+    clearTimeout(this.readyTimer);
     this.error = value instanceof Error ? value : new Error(String(value));
     this.rejectReady(this.error);
     for (const pending of this.pending.values()) {
@@ -329,7 +372,7 @@ export class SidecarClient {
   async request(command, fields = {}) {
     await this.ready;
     if (this.error) throw this.error;
-    if (this.child.exitCode !== null) throw new Error("sidecar has exited");
+    if (this.child.exitCode !== null || this.child.signalCode !== null) throw new Error("sidecar has exited");
     const id = String(this.nextId++);
     const record = { v: 1, id, command, ...fields };
     const encoded = Buffer.from(`${JSON.stringify(record)}\n`);
@@ -342,17 +385,14 @@ export class SidecarClient {
       this.pending.set(id, { resolve, reject, timer });
     });
     try {
-      await new Promise((resolve, reject) => {
-        this.child.stdin.write(encoded, (error) => error ? reject(error) : resolve());
+      this.child.stdin.write(encoded, (error) => {
+        if (error) this.fail(error);
       });
     } catch (error) {
-      const pending = this.pending.get(id);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pending.delete(id);
-      }
-      throw error;
+      this.fail(error);
     }
+    // Observe the response immediately: an exit/error can precede the write
+    // callback, so awaiting a separate write promise would leave it unhandled.
     return response;
   }
 
@@ -362,14 +402,28 @@ export class SidecarClient {
 
   status() { return this.request("status"); }
 
-  async close() {
-    if (this.child.exitCode !== null || this.child.signalCode !== null) return this.closed;
-    try { await this.request("close"); }
-    catch (error) {
-      if (this.child.exitCode === null && !this.error) throw error;
+  close() {
+    if (!this.closing) this.closing = this.closeOnce();
+    return this.closing;
+  }
+
+  async closeOnce() {
+    const timeoutMs = Math.min(this.timeoutMs, SHUTDOWN_TIMEOUT_MS);
+    try {
+      if (this.child.exitCode === null && this.child.signalCode === null && !this.error) {
+        await withDeadline(this.request("close"), timeoutMs, `sidecar close timed out after ${timeoutMs} ms`);
+        this.child.stdin.end();
+        await withDeadline(this.closed, timeoutMs, `sidecar did not exit after close within ${timeoutMs} ms`);
+      }
+    } catch (error) {
+      this.fail(error);
+    } finally {
+      // A peer may close its pipe or acknowledge close without exiting.
+      // Neither condition releases our ownership of its process.
+      await terminate(this.child);
+      this.child.stdin.destroy();
     }
-    this.child.stdin.end();
-    const result = await this.closed;
+    const result = await withDeadline(this.closed, SHUTDOWN_TIMEOUT_MS, "sidecar process streams did not close");
     if (this.error) throw this.error;
     return result;
   }
@@ -525,10 +579,18 @@ export async function startDemo(rawOptions) {
   const close = () => {
     if (closing) return closing;
     closing = (async () => {
-      signaling?.stop();
-      try { await sidecar?.close(); } catch { await terminate(sidecar?.child); }
-      try { await server?.close(); } catch { /* another shutdown path won */ }
-      await terminate(native?.child);
+      const results = await Promise.allSettled([
+        (async () => { signaling?.stop(); })(),
+        (async () => {
+          try { await sidecar?.close(); }
+          catch { /* control failure must not prevent process cleanup */ }
+          finally { await terminate(sidecar?.child); }
+        })(),
+        (async () => { await server?.close(); })(),
+        (async () => { await terminate(native?.child); })(),
+      ]);
+      const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+      if (errors.length) throw new AggregateError(errors, "demo cleanup failed");
     })();
     return closing;
   };
@@ -651,7 +713,8 @@ export async function startDemo(rawOptions) {
       close,
     };
   } catch (error) {
-    await close();
+    try { await close(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "demo startup and cleanup failed"); }
     throw error;
   }
 }

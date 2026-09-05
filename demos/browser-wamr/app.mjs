@@ -40,6 +40,7 @@ const state = {
   moduleMeta: null,
   active: null,
   runner: null,
+  starting: false,
   accepting: false,
   acceptController: null,
   acceptStream: null,
@@ -70,7 +71,7 @@ function setBadge(element, text, style = "muted") {
 
 function refreshControls() {
   const running = state.active !== null && state.runner !== null;
-  const occupied = running || state.accepting;
+  const occupied = running || state.starting || state.accepting;
   elements.startBrowser.disabled = !state.moduleBytes || occupied;
   elements.armTarget.disabled = occupied;
   elements.armTarget.hidden = state.accepting;
@@ -307,7 +308,11 @@ async function driveWorkload(instance, entry, args) {
 }
 
 async function startBrowserWorkload() {
-  if (!state.moduleBytes || state.runner || state.accepting) return;
+  if (!state.moduleBytes || state.starting || state.runner || state.accepting) return;
+  // Reserve the source slot synchronously: instantiation yields before a
+  // runner exists, and another Start or incoming Arm must not occupy it.
+  state.starting = true;
+  refreshControls();
   try {
     const entry = elements.entry.value;
     const args = parseEntryArgs(state.moduleMeta, entry, elements.entryArgs.value);
@@ -316,6 +321,7 @@ async function startBrowserWorkload() {
     await instance.instantiate();
     instance.init();
     state.runner = driveWorkload(instance, entry, args);
+    state.starting = false;
     refreshControls();
     await state.runner;
   } catch (error) {
@@ -323,12 +329,14 @@ async function startBrowserWorkload() {
     log(`could not start workload: ${error.message}`, "error");
     state.runner = null;
     state.active = null;
+  } finally {
+    state.starting = false;
     refreshControls();
   }
 }
 
 async function armBrowserTarget() {
-  if (state.runner || state.accepting) return;
+  if (state.starting || state.runner || state.accepting) return;
   state.accepting = true;
   state.acceptController = new AbortController();
   setBadge(elements.runtimeState, "armed", "busy");

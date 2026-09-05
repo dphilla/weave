@@ -70,6 +70,7 @@ const state = {
   moduleCache: new Map(),
   active: null,
   runner: null,
+  starting: false,
   accepting: false,
   incomingController: null,
   incomingStream: null,
@@ -107,10 +108,10 @@ function refreshControls() {
   const running = state.active !== null && state.runner !== null;
   elements.startWorkload.disabled = state.everStarted || !state.moduleBytes ||
     !channelOpen(OUTBOUND_LABEL) || !channelOpen(INBOUND_LABEL) ||
-    running || state.accepting;
+    running || state.starting || state.accepting;
   elements.migrateWorkload.disabled = !running || !channelOpen(OUTBOUND_LABEL) ||
     state.migrationRequested || state.usedOutbound;
-  elements.armTarget.disabled = !state.everStarted || running || state.accepting ||
+  elements.armTarget.disabled = !state.everStarted || running || state.starting || state.accepting ||
     state.usedInbound || !state.moduleBytes || !channelOpen(INBOUND_LABEL);
   elements.armTarget.hidden = state.accepting;
   elements.cancelTarget.hidden = !state.accepting;
@@ -630,7 +631,9 @@ async function driveWorkload(instance, entry, args) {
 }
 
 async function startBrowserWorkload() {
-  if (!state.moduleBytes || state.runner || state.accepting || state.everStarted) return;
+  if (!state.moduleBytes || state.starting || state.runner || state.accepting || state.everStarted) return;
+  state.starting = true;
+  refreshControls();
   try {
     const entry = elements.entry.value;
     const args = parseEntryArgs(state.moduleMeta, entry, elements.entryArgs.value);
@@ -640,6 +643,7 @@ async function startBrowserWorkload() {
     instance.init();
     state.everStarted = true;
     state.runner = driveWorkload(instance, entry, args);
+    state.starting = false;
     refreshControls();
     await state.runner;
   } catch (error) {
@@ -648,12 +652,14 @@ async function startBrowserWorkload() {
     log(`could not start workload: ${error.message}`, "error");
     state.runner = null;
     state.active = null;
+  } finally {
+    state.starting = false;
     refreshControls();
   }
 }
 
 async function armBrowserTarget() {
-  if (state.runner || state.accepting || state.usedInbound || !state.moduleBytes) return;
+  if (state.starting || state.runner || state.accepting || state.usedInbound || !state.moduleBytes) return;
   state.accepting = true;
   state.usedInbound = true;
   state.incomingController = new AbortController();

@@ -284,12 +284,17 @@ async function waitForUi(client, description, predicate, timeoutMs) {
   );
 }
 
-async function click(client, id) {
+async function click(client, id, activations = 1) {
   return client.evaluate(`(() => {
     const element = document.getElementById(${JSON.stringify(id)});
     if (!element) throw new Error('missing element ${id}');
     if (element.disabled) throw new Error('element ${id} is disabled');
     element.click();
+    const disabledAfterFirst = element.disabled;
+    for (let i = 1; i < ${activations}; i++) element.click();
+    if (${activations} > 1 && !disabledAfterFirst) {
+      throw new Error('${id} did not reserve its operation synchronously');
+    }
     return true;
   })()`);
 }
@@ -301,6 +306,15 @@ function logLines(text) {
 
 function emitIndices(text) {
   return [...text.matchAll(/\bEMIT (-?\d+) (-?\d+)/g)].map((match) => Number(match[1]));
+}
+
+function assertSingleStart(text) {
+  const starts = [...text.matchAll(/\bstarting run in browser\b/g)].length;
+  const initialEmits = emitIndices(text).filter((value) => value === 0).length;
+  if (starts !== 1 || initialEmits !== 1) {
+    throw new Error(`burst Start created ${starts} runs and ${initialEmits} initial EMITs`);
+  }
+  process.stdout.write("ok: burst Start produced one workload and one initial EMIT\n");
 }
 
 function firstAppendedEmit(previousLog, currentLog) {
@@ -488,10 +502,11 @@ async function run(options, chrome) {
     await cdp.evaluate(`document.getElementById('entry-args').value = ${JSON.stringify(String(options.iterations))}`);
 
     process.stdout.write("phase 1/2: Chrome/V8 -> sidecar -> Wasmtime\n");
-    await click(cdp, "start-workload");
-    await waitForUi(cdp, "browser workload", (ui) => ui.runtime === "running" && !ui.migrateDisabled, options.timeoutMs);
+    await click(cdp, "start-workload", 3);
+    const started = await waitForUi(cdp, "browser workload", (ui) => ui.runtime === "running" && !ui.migrateDisabled && emitIndices(ui.log).length >= 1, options.timeoutMs);
+    assertSingleStart(started.log);
     const nativeStart = demo.native.log.lines.length;
-    await click(cdp, "migrate-workload");
+    await click(cdp, "migrate-workload", 3);
     const migrated = await waitForUi(
       cdp,
       "browser migration to native",

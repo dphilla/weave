@@ -270,18 +270,52 @@ async function waitForUi(client, description, predicate, timeoutMs) {
   );
 }
 
-async function click(client, id) {
+async function click(client, id, activations = 1) {
   await client.evaluate(`(() => {
     const element = document.getElementById(${JSON.stringify(id)});
     if (!element) throw new Error('missing ${id}');
     if (element.disabled) throw new Error('${id} is disabled');
     element.click();
+    const disabledAfterFirst = element.disabled;
+    for (let i = 1; i < ${activations}; i++) element.click();
+    if (${activations} > 1 && !disabledAfterFirst) {
+      throw new Error('${id} did not reserve its operation synchronously');
+    }
     return true;
   })()`);
 }
 
 function emitIndices(text) {
   return [...text.matchAll(/\bEMIT (-?\d+) (-?\d+)/g)].map((match) => Number(match[1]));
+}
+
+function assertSingleStart(text) {
+  const starts = [...text.matchAll(/\bstarting run in peer A\b/g)].length;
+  const initialEmits = emitIndices(text).filter((value) => value === 0).length;
+  if (starts !== 1 || initialEmits !== 1) {
+    throw new Error(`burst Start created ${starts} runs and ${initialEmits} initial EMITs`);
+  }
+  process.stdout.write("ok: burst Start produced one workload and one initial EMIT\n");
+}
+
+async function assertStableRetirement(a, b) {
+  // Exercise the original ten-second arm deadline after both migrations. The
+  // current owner may complete naturally, but a retired source must stay retired.
+  const deadline = Date.now() + 11_000;
+  do {
+    const [owner, retired] = await Promise.all([snapshot(a), snapshot(b)]);
+    if (retired.runtime !== "migrated" || retired.owner !== "none" || !retired.migrateDisabled) {
+      throw new Error(`retired peer B changed state: ${JSON.stringify(retired)}`);
+    }
+    if (!["running", "complete"].includes(owner.runtime)) {
+      throw new Error(`peer A lost its running/completed state: ${owner.runtime}`);
+    }
+    if (/target arm timed out/.test(owner.log) || /target arm timed out/.test(retired.log)) {
+      throw new Error("a stale target-arm timeout fired after ownership transfer");
+    }
+    await delay(100);
+  } while (Date.now() < deadline);
+  process.stdout.write("ok: retired peer stayed migrated beyond the 10-second arm deadline\n");
 }
 
 function lines(text) {
@@ -520,9 +554,10 @@ async function run(options, chrome) {
     await a.evaluate(`document.getElementById('entry-args').value = ${JSON.stringify(String(options.iterations))}`);
 
     process.stdout.write("phase 1/2: peer A -> peer B\n");
-    await click(a, "start-workload");
-    await waitForUi(a, "peer A running", (ui) => ui.runtime === "running" && !ui.migrateDisabled && emitIndices(ui.log).length >= 2, options.timeoutMs);
-    await click(a, "migrate-workload");
+    await click(a, "start-workload", 3);
+    const started = await waitForUi(a, "peer A running", (ui) => ui.runtime === "running" && !ui.migrateDisabled && emitIndices(ui.log).length >= 2, options.timeoutMs);
+    assertSingleStart(started.log);
+    await click(a, "migrate-workload", 3);
     const [aMigrated, bRunning] = await Promise.all([
       waitForUi(a, "peer A retirement", (ui) => ui.runtime === "migrated" && ui.log.includes("migration committed"), options.timeoutMs),
       waitForUi(b, "peer B ownership", (ui) => ui.runtime === "running" && ui.log.includes("accepted and verified workload") && emitIndices(ui.log).length >= 1, options.timeoutMs),
@@ -532,7 +567,7 @@ async function run(options, chrome) {
     process.stdout.write("phase 2/2: peer B -> peer A\n");
     const aBeforeReturn = aMigrated.log;
     await waitForUi(b, "peer B migration control", (ui) => ui.runtime === "running" && !ui.migrateDisabled && emitIndices(ui.log).length >= 2, options.timeoutMs);
-    await click(b, "migrate-workload");
+    await click(b, "migrate-workload", 3);
     const [bMigrated, aRunning] = await Promise.all([
       waitForUi(b, "peer B retirement", (ui) => ui.runtime === "migrated" && ui.log.includes("migration committed"), options.timeoutMs),
       waitForUi(a, "peer A resumed ownership", (ui) => ui.runtime === "running" && ui.log.includes("accepted and verified workload") && firstAppendedEmit(aBeforeReturn, ui.log) !== null, options.timeoutMs),
@@ -542,6 +577,8 @@ async function run(options, chrome) {
       firstAppendedEmit(aBeforeReturn, aRunning.log),
       "peer B -> peer A",
     );
+
+    await assertStableRetirement(a, b);
 
     await waitForUi(a, "selected ICE path", (ui) => ui.path !== "not selected", options.timeoutMs);
     if (a.exceptions.length || b.exceptions.length) {

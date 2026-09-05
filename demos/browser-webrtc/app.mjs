@@ -72,6 +72,7 @@ const state = {
   moduleCache: new Map(),
   active: null,
   runner: null,
+  starting: false,
   accepting: false,
   incomingController: null,
   incomingStream: null,
@@ -118,7 +119,7 @@ function outboundReady() {
 function refreshControls() {
   const running = state.active !== null && state.runner !== null;
   const ready = dataPlaneReady();
-  elements.startWorkload.disabled = peer !== "a" || state.everStarted || !state.moduleBytes || !ready || running || state.accepting;
+  elements.startWorkload.disabled = peer !== "a" || state.everStarted || !state.moduleBytes || !ready || running || state.starting || state.accepting;
   elements.migrateWorkload.disabled = !running || !outboundReady() || state.migrationRequested || state.pendingArm !== null || state.usedOutbound.has(outboundLabel());
   elements.metricOwner.textContent = running
     ? `peer ${peer.toUpperCase()}`
@@ -331,6 +332,9 @@ function registerDataChannel(channel) {
   channel.addEventListener("close", () => {
     log(`${channel.label} data channel closed`);
     if (channel.label === "control") state.control = null;
+    if (channel.label === "control" || state.pendingArm?.label === channel.label) {
+      state.pendingArm?.reject(new Error(`${channel.label} data channel closed while arming`));
+    }
     refreshControls();
   });
   channel.addEventListener("error", () => log(`${channel.label} data channel failed`, "error"));
@@ -374,7 +378,7 @@ async function armIncomingMigration(label) {
     log(`rejected incoming migration: ${reason}`, "error");
   };
   if (label !== inboundLabel()) return reject(`unexpected channel ${label}`);
-  if (state.active || state.runner || state.accepting) return reject("target already owns or stages a workload");
+  if (state.starting || state.active || state.runner || state.accepting) return reject("target already owns or stages a workload");
   if (state.usedInbound.has(label)) return reject("migration channel has already been used");
   if (!state.moduleBytes || !state.moduleHashHex) return reject("target module policy is not ready");
   const channel = state.channels.get(label);
@@ -717,6 +721,9 @@ async function driveWorkload(instance, entry, args) {
     setBadge(elements.runtimeState, "failed", "error");
     log(`workload failed: ${error.stack ?? error}`, "error");
   } finally {
+    if (state.pendingArm?.instance === instance) {
+      state.pendingArm.reject(new Error("workload stopped before target was armed"));
+    }
     state.active = null;
     state.runner = null;
     state.migrationRequested = false;
@@ -752,7 +759,9 @@ async function loadModule() {
 }
 
 async function startWorkload() {
-  if (elements.startWorkload.disabled) return;
+  if (state.starting || elements.startWorkload.disabled) return;
+  state.starting = true;
+  refreshControls();
   try {
     const entry = elements.entry.value;
     const args = parseEntryArgs(state.moduleMeta, entry, elements.entryArgs.value);
@@ -762,6 +771,7 @@ async function startWorkload() {
     instance.init();
     state.everStarted = true;
     state.runner = driveWorkload(instance, entry, args);
+    state.starting = false;
     refreshControls();
     await state.runner;
   } catch (error) {
@@ -769,31 +779,69 @@ async function startWorkload() {
     state.active = null;
     setBadge(elements.runtimeState, "failed", "error");
     log(`could not start workload: ${error.message}`, "error");
+  } finally {
+    state.starting = false;
     refreshControls();
   }
 }
 
 async function requestMigration() {
-  if (elements.migrateWorkload.disabled) return;
+  if (state.pendingArm || state.migrationRequested || !state.active || !state.runner || elements.migrateWorkload.disabled) return;
   const label = outboundLabel();
   const channel = state.channels.get(label);
   if (channel?.readyState !== "open") return;
+
+  const instance = state.active;
+  const runner = state.runner;
+  let resolveArm, rejectArm;
+  const armed = new Promise((resolve, reject) => {
+    resolveArm = resolve;
+    rejectArm = reject;
+  });
+  // A synchronous send failure or channel-close callback can reject before
+  // the await below is reached. Observe the operation from its creation.
+  void armed.catch(() => {});
+  let timer;
+  let settled = false;
+  let cancelled = null;
+  const pending = {
+    label,
+    instance,
+    resolve() {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveArm();
+    },
+    reject(error) {
+      // Cancellation can arrive after ACK resolved the promise but before its
+      // continuation runs. Keep that fact even though rejection is now inert.
+      cancelled ??= error;
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rejectArm(error);
+    },
+  };
+  // Reserve before refresh/send/await; repeated activation must not overwrite
+  // the pending request or leave its ten-second timer behind.
+  state.pendingArm = pending;
+  timer = setTimeout(() => {
+    if (!settled) pending.reject(new Error("target arm timed out after 10 seconds"));
+  }, 10_000);
   setBadge(elements.runtimeState, "arming peer", "busy");
   log(`asking peer ${otherPeer.toUpperCase()} to arm ${label}`, "wire");
   refreshControls();
 
-  let timer;
   try {
-    await new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error("target arm timed out after 10 seconds")), 10_000);
-      state.pendingArm = {
-        label,
-        resolve: () => { clearTimeout(timer); resolve(); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
-      };
-      controlSend({ type: "prepare-migration", channel: label });
-    });
-    state.pendingArm = null;
+    controlSend({ type: "prepare-migration", channel: label });
+    await armed;
+    if (state.pendingArm !== pending) return;
+    if (cancelled) throw cancelled;
+    if (state.active !== instance || state.runner !== runner) {
+      throw new Error("workload stopped before target was armed");
+    }
+    if (!outboundReady()) throw new Error("migration channel closed while arming");
     state.usedOutbound.add(label);
     state.outboundStream = new RTCDataChannelByteStream(channel, {
       connectTimeoutMs: 0,
@@ -803,13 +851,16 @@ async function requestMigration() {
     state.migrationRequested = true;
     setBadge(elements.runtimeState, "queued", "busy");
     log("target armed; migration begins at the next guest poll", "wire");
-    refreshControls();
   } catch (error) {
-    clearTimeout(timer);
+    if (state.pendingArm !== pending) return;
     state.pendingArm = null;
     try { controlSend({ type: "cancel-migration", channel: label }); } catch { /* connection failed */ }
-    setBadge(elements.runtimeState, "running", "");
-    log(`target could not be armed: ${error.message}`, "error");
+    const stillRunning = state.active === instance && state.runner === runner;
+    if (stillRunning) setBadge(elements.runtimeState, "running", "");
+    log(`target could not be armed: ${error.message}`, stillRunning ? "error" : "info");
+  } finally {
+    clearTimeout(timer);
+    if (state.pendingArm === pending) state.pendingArm = null;
     refreshControls();
   }
 }
@@ -843,6 +894,7 @@ elements.clearLog.addEventListener("click", () => {
   elements.log.textContent = "";
 });
 window.addEventListener("pagehide", () => {
+  state.pendingArm?.reject(new Error("page closed while arming"));
   clearInterval(state.statsTimer);
   state.signaling?.stop();
   void state.session?.close();

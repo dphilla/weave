@@ -31,6 +31,9 @@ WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/rust-guest" \
   .github/ci/rust-guest.sh
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/conformance" \
   .github/ci/conformance.sh --suite all
+WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/semantics" \
+WEAVE_WAZERO_BIN="${WEAVE_WAZERO_BIN:-$ARTIFACT_ROOT/conformance/bin/weave-wazero}" \
+  .github/ci/semantic-conformance.sh all --skip-build
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/multi-memory" \
   .github/ci/wamr-fixture.sh --skip-build
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/browser" \

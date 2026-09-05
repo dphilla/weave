@@ -94,6 +94,11 @@ jobs:
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/pr/conformance
         run: .github/ci/conformance.sh --suite pr
+      - name: Check fixed guest semantics across native runtimes
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/pr/semantics
+          WEAVE_WAZERO_BIN: ${{ runner.temp }}/weave-ci/pr/conformance/bin/weave-wazero
+        run: .github/ci/semantic-conformance.sh native --skip-build
       - name: Check checkpoint-file restore in a fresh process
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/pr/checkpoint

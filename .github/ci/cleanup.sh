@@ -206,6 +206,7 @@ is_allowlisted_temp_name() {
     weave-browser-smoke.?* | \
     weave-checkpoint.?* | \
     weave-native-e2e.?* | \
+    weave-semantic-conformance.?* | \
     weave-rust-guest.?* | \
     weave-spec-corpus.?* | \
     weave-adversity | weave-adversity.?* | \

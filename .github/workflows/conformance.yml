@@ -55,6 +55,11 @@ jobs:
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/native/pairs
         run: .github/ci/conformance.sh --suite native
+      - name: Check fixed guest semantics across native runtimes
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/native/semantics
+          WEAVE_WAZERO_BIN: ${{ runner.temp }}/weave-ci/native/pairs/bin/weave-wazero
+        run: .github/ci/semantic-conformance.sh native --skip-build
       - name: Build and migrate the Rust/LLVM guest
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/native/rust-guest
@@ -95,6 +100,10 @@ jobs:
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/wamr
         run: .github/ci/conformance.sh --suite wamr
+      - name: Check WAMR guest semantics and SIMD state migration
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/wamr/semantics
+        run: .github/ci/semantic-conformance.sh wamr --skip-build
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -31,6 +31,7 @@ Cargo behavior unless the caller sets that variable too.
 | `wait-for.sh` | Suspend-safe process, output, and event condition waits |
 | `wait-for.test.sh` | Isolated condition success and active-time timeout checks |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
+| `semantic-conformance.sh` | Fixed expected guest traces for initialization, memory, tail calls, and SIMD before/after migration |
 | `checkpoint-file.sh` | Checkpoint-file → fresh-process restore golden check |
 | `rust-guest.sh` | Out-of-tree Rust/LLVM guest build and Wasmtime→Node migration |
 | `native-e2e.sh` | Safe composition used by the legacy `scripts/e2e.sh` shim |
@@ -73,6 +74,9 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-edge \
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
   .github/ci/conformance.sh --route wasmtime:node:wazero
 
+# Compare against fixed expected guest behavior, including a three-hop native route.
+.github/ci/semantic-conformance.sh native
+
 # Unique non-WAMR product scenarios retained from the original E2E harness.
 .github/ci/checkpoint-file.sh
 .github/ci/rust-guest.sh
@@ -80,8 +84,8 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
 
 ### Local power and suspend behavior
 
-On macOS, `qualification.sh` and executing (non-`--list`) invocations of
-`conformance.sh` automatically re-exec once under the built-in
+On macOS, `qualification.sh`, `semantic-conformance.sh`, and executing
+(non-`--list`) invocations of `conformance.sh` automatically re-exec once under the built-in
 `caffeinate -i -s`. This prevents idle sleep and, while on AC power, system
 sleep for the command's lifetime without keeping the display awake. The guard
 is centralized in `awake-guard.sh`; qualification's inherited sentinel keeps
@@ -153,6 +157,7 @@ export WAMR_ROOT="$ci_tmp/wasm-micro-runtime"
 .github/ci/run-wamr.sh
 .github/ci/conformance.sh --suite wamr
 .github/ci/wamr-fixture.sh --skip-build
+.github/ci/semantic-conformance.sh wamr
 ```
 
 `prepare-wamr.sh` intentionally accepts destinations only beneath
@@ -210,6 +215,39 @@ requires the
 default release binaries to exist (or `WEAVE_BIN`, `WEAVE_WAZERO_BIN`, and
 `WEAVE_WAMR_BIN` to name them explicitly).
 
+### Fixed guest semantics
+
+`semantic-conformance.sh native|wamr|all` compares each runtime with fixed
+expected events, independently of the woven Wasmtime golden run. The three
+fixtures in [`tests/fixtures/p1`](../../tests/fixtures/p1/) cover synchronous
+initialization, explicit `_start` invocation, nonfirst-entry result selection,
+pure tail calls, fixed and zero memory maxima, logical size/growth, zero-filled
+new pages, guest pointers, relocated table shadows, and dropped passive segments.
+Each standalone check uses 1000 iterations and compares the full `EMIT*` and
+`WEAVE_DONE` trace with the adjacent `.events` file.
+
+The native lane runs those checks on Wasmtime, Node, and wazero, then migrates
+the combined memory fixture through Wasmtime → Node → wazero → Wasmtime. The
+WAMR lane checks Wasmtime/WAMR and runs Wasmtime → WAMR → Wasmtime for both the
+combined fixture and `wamr/tests/fixtures/simd-multi-memory.wat`. The SIMD case
+retains vector values across nested calls, indexed memory operations, and
+checkpoints; its independently expected result is the iteration count plus
+198. `all` shares builds and the standalone Wasmtime checks between lanes.
+
+Main-fixture routes default to 80 million iterations with two-event migration
+thresholds. The SIMD route defaults to 100 million and per-hop thresholds
+`1,0`. Override `WEAVE_CI_SEMANTIC_ITERATIONS` (or `WEAVE_CI_ITERATIONS`) and
+`WEAVE_CI_SIMD_ITERATIONS` for local investigation; smaller counts may finish
+before a control request arrives. Both the uninterrupted golden and every
+migrated trace must match the independent expectation. Logs and mismatch
+diffs remain under the selected artifact directory.
+
+Explicit runtime binary overrides are used without rebuilding them.
+`--skip-build` reuses existing binaries, as the hosted workflows do after their
+ordinary conformance steps. The native lane is required in PR/main and the
+legacy native E2E composition; WAMR semantic coverage is required on main.
+Release qualification runs both lanes.
+
 ## What is required today
 
 The PR-required lanes are:
@@ -219,6 +257,8 @@ The PR-required lanes are:
 - Go format, vet, tests, and a non-source-tree build.
 - The six-case representative migration suite, including the advertised
   three-runtime server demo route.
+- Fixed guest semantic traces across Wasmtime/Node/wazero, including a
+  Wasmtime → Node → wazero → Wasmtime migration route.
 - Checkpoint-file restore in a fresh process.
 - Shell/workflow static validation.
 

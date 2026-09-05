@@ -78,6 +78,7 @@ allowed_names=(
   weave-browser-smoke.abc123
   weave-checkpoint.abc123
   weave-native-e2e.abc123
+  weave-semantic-conformance.abc123
   weave-rust-guest.abc123
   weave-spec-corpus.abc123
   weave-adversity

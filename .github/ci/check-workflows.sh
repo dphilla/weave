@@ -25,6 +25,10 @@ bash -n scripts/*.sh
   printf '%s\n' '.github/ci/package-smoke.sh must be executable' >&2
   exit 1
 }
+[[ -x .github/ci/semantic-conformance.sh ]] || {
+  printf '%s\n' '.github/ci/semantic-conformance.sh must be executable' >&2
+  exit 1
+}
 [[ -x .github/ci/browser-sidecar-smoke.sh ]] || {
   printf '%s\n' '.github/ci/browser-sidecar-smoke.sh must be executable' >&2
   exit 1

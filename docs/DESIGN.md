@@ -167,8 +167,14 @@ memory, funcref reference types, SIMD/v128, multiple memories, and tail calls
   signature (shadow parameters) including indirect-call types; LLVM/Go/Rust
   toolchains never emit it (function pointers are table indices). Rejected
   rather than half-supported.
-- **exceptions / GC / memory64**: out of scope for the current guest ABI; each
+- **exceptions / GC / memory64 / table64**: out of scope for the current guest ABI; each
   is a bounded, known extension of the same machinery.
+
+Unsupported table widths, exception tags/instructions, and GC instructions
+(including constant expressions) are checked before general input validation.
+They produce explicit unsupported-feature diagnostics instead of reaching
+instrumentation or looking like malformed supported input. Supported inputs
+still undergo full input and generated-output validation.
 
 ## 2. The protocol (amortization)
 

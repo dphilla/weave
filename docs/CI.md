@@ -18,11 +18,12 @@ contains only triggers, permissions, job ordering, and artifact upload wiring.
 The qualification workflow never publishes a release and has only
 `contents: read` permission. A tag indicates a candidate to test, not proof
 that it passed; release publication should wait for this workflow's result.
-It composes units, workflow validation, checkpoint restore, the Rust guest,
-all runtime directions, fixed guest semantics and SIMD state migration,
+It composes Rust formatting/Clippy, units, workflow validation, checkpoint
+restore, the Rust guest, all runtime directions, fixed guest semantics and SIMD state migration,
 WAMR/Chrome, browser/WebRTC, host-service baseline, and adversity.
-It intentionally excludes the floating upstream corpus and the two known-red
-advisory lanes (Rust quality and Go race); inspect their separate recent runs.
+It intentionally excludes the floating upstream corpus and the advisory Go
+race lane; inspect their separate recent runs. Rust quality is required on
+PRs, main, and qualification, including WAMR Clippy in configured WAMR lanes.
 
 ## Why it is split
 
@@ -51,6 +52,11 @@ pass merely by producing the same wrong behavior everywhere. PRs run the
 native lane; main adds WAMR and live SIMD/multiple-memory state. Qualification
 runs both. See the [semantic lane documentation](../.github/ci/README.md#fixed-guest-semantics)
 for commands, fixtures, and replay settings.
+
+The weekly corpus accepts only explicit unsupported-feature rejections.
+Unexpected transformer errors, crashes, and invalid output are hard failures,
+without per-module or diagnostic-pattern baseline exceptions. The same policy
+is checked locally by `.github/ci/spec-corpus.test.sh` and in workflow validation.
 
 This mirrors established systems practice: compiler projects use fast common
 builders plus specialist buildbots, browser projects share one conformance
@@ -155,15 +161,12 @@ the complete behavior and commands.
 
 1. Manually dispatch `Pull request` and confirm all required jobs and uploaded
    artifacts on GitHub-hosted infrastructure.
-2. Make the Rust, JavaScript, Go, and representative conformance jobs branch
-   protection requirements. Leave the named Rust-quality job advisory until
-   its inherited baseline is repaired.
+2. Make the Rust tests, Rust formatting and Clippy, JavaScript, Go, and
+   representative conformance jobs branch protection requirements.
 3. Let `Main conformance`, including all real-browser routes, pass at least
    once before treating README runtime claims as CI-qualified.
 4. Observe several scheduled runs, then decide whether advisory Go race can
    become required and whether timeouts/iteration counts need tuning.
-5. Repair formatting/Clippy findings and promote that existing job to a PR
-   requirement.
 
 Branch protection/rulesets are repository settings, not YAML. Until those
 named checks are configured as required, GitHub will run them but will not

@@ -751,7 +751,10 @@ func NewInstance(ctx context.Context, wasm []byte, services []Service, emitLog f
 		return nil, fmt.Errorf("registering env services: %w", err)
 	}
 
-	mod, err := rt.InstantiateModule(ctx, compiled, wazero.NewModuleConfig())
+	// Woven modules enter only through explicit Init/CallEntry/Resume calls.
+	// wazero's default would invoke an exported _start during instantiation,
+	// including while a migration target is still staging before COMMIT.
+	mod, err := rt.InstantiateModule(ctx, compiled, wazero.NewModuleConfig().WithStartFunctions())
 	if err != nil {
 		return nil, fmt.Errorf("instantiating module: %w", err)
 	}

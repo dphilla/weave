@@ -13,10 +13,10 @@ usage() {
 usage: .github/ci/run-unit.sh rust|rust-quality|js|go|all
 
   rust          build and test the root Rust workspace
-  rust-quality  report rustfmt/clippy status (advisory until the baseline is clean)
+  rust-quality  require root/WAMR rustfmt and warning-free root Clippy
   js            run Node and browser-transport unit tests
   go            format-check, vet, test, and build both Go modules
-  all           run rust, js, and go sequentially
+  all           run rust-quality, rust, js, and go sequentially
 EOF
 }
 
@@ -78,6 +78,7 @@ case "${1:-}" in
   js) run_js ;;
   go) run_go ;;
   all)
+    run_rust_quality
     run_rust
     run_js
     run_go

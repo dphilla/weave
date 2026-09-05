@@ -63,8 +63,7 @@ jobs:
         run: .github/ci/check-workflows.sh
 
   rust-quality:
-    name: Rust formatting and Clippy (advisory baseline)
-    continue-on-error: true
+    name: Rust formatting and Clippy
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -78,7 +77,7 @@ jobs:
 
   conformance:
     name: Representative migration conformance
-    needs: [rust, javascript, go]
+    needs: [rust, rust-quality, javascript, go]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:

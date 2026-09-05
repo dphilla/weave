@@ -19,6 +19,7 @@ weave_ci_artifacts_init weave-qualification ARTIFACT_ROOT
 # undifferentiated artifact directory.
 unset WEAVE_CI_ARTIFACT_DIR
 
+.github/ci/run-unit.sh rust-quality
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go

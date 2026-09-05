@@ -61,23 +61,6 @@ ROOT_CARGO_TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 WEAVE_BIN="${WEAVE_BIN:-$ROOT_CARGO_TARGET/release/weave}"
 MIN_SUCCESSES="${WEAVE_CORPUS_MIN_SUCCESSES:-25}"
 MAX_WAST="${WEAVE_CORPUS_MAX_WAST_FILES:-0}"
-KNOWN_FAILURES_FILE="$ROOT/.github/ci/spec-corpus-known-failures.txt"
-
-known_failure_match() {
-  local wanted_stem="$1" wanted_module="$2" stderr="$3"
-  local known_stem known_module pattern reason line_number=0
-  while IFS='|' read -r known_stem known_module pattern reason; do
-    line_number=$((line_number + 1))
-    [[ -n "$known_stem" && "$known_stem" != \#* ]] || continue
-    if [[ "$wanted_stem" == "$known_stem" ]] \
-      && [[ "$known_module" == '*' || "$wanted_module" == "$known_module" ]] \
-      && grep -Eq "$pattern" "$stderr"; then
-      printf '%s\t%s' "$line_number" "$reason"
-      return 0
-    fi
-  done < "$KNOWN_FAILURES_FILE"
-  return 1
-}
 
 expected_rejection_reason() {
   local detail="$1"
@@ -107,13 +90,10 @@ mapfile_compat < <(find "$TESTSUITE" -maxdepth 1 -type f -name '*.wast' -print |
 
 successes=0
 rejections=0
-known_failures=0
 scripts=0
 failures=0
 processed=0
 report="$ARTIFACT_DIR/report.tsv"
-used_known_failures="$ARTIFACT_DIR/used-known-failure-lines.txt"
-: > "$used_known_failures"
 printf 'wast\tmodule\tresult\tdetail\n' > "$report"
 
 for wast in "${WAST_FILES[@]}"; do
@@ -170,19 +150,15 @@ PY
         failures=$((failures + 1))
       fi
     else
+      transform_status=$?
       detail="$(head -1 "$stderr" | tr '\t' ' ')"
-      if match="$(known_failure_match "$stem" "$module" "$stderr")"; then
-        rule_number="${match%%$'\t'*}"
-        reason="${match#*$'\t'}"
-        printf '%s\n' "$rule_number" >> "$used_known_failures"
-        printf '%s\t%s\tknown-baseline-failure\t%s: %s\n' "$stem" "$module" "$reason" "$detail" >> "$report"
-        known_failures=$((known_failures + 1))
-      elif reason="$(expected_rejection_reason "$detail")"; then
-        printf '%s\t%s\trejected\t%s: %s\n' "$stem" "$module" "$reason" "$detail" >> "$report"
-        rejections=$((rejections + 1))
-      elif grep -Eiq 'panic|panicked|internal error|segmentation fault|BUG:' "$stderr"; then
+      # A crash must never be hidden by an earlier unsupported diagnostic.
+      if ((transform_status > 128)) || grep -Eiq 'panic|panicked|internal error|segmentation fault|BUG:' "$stderr"; then
         printf '%s\t%s\ttransform-crash\t%s\n' "$stem" "$module" "$detail" >> "$report"
         failures=$((failures + 1))
+      elif ((transform_status == 1)) && reason="$(expected_rejection_reason "$detail")"; then
+        printf '%s\t%s\trejected\t%s: %s\n' "$stem" "$module" "$reason" "$detail" >> "$report"
+        rejections=$((rejections + 1))
       else
         printf '%s\t%s\tunexpected-transform-failure\t%s\n' "$stem" "$module" "$detail" >> "$report"
         failures=$((failures + 1))
@@ -191,26 +167,12 @@ PY
   done < "$modules_file"
 done
 
-if ((MAX_WAST == 0)); then
-  line_number=0
-  while IFS='|' read -r known_stem known_module pattern reason; do
-    line_number=$((line_number + 1))
-    [[ -n "$known_stem" && "$known_stem" != \#* ]] || continue
-    if ! grep -qx "$line_number" "$used_known_failures"; then
-      printf '%s\t%s\tstale-known-failure\t%s\n' "$known_stem" "$known_module" "$reason" >> "$report"
-      printf 'known corpus baseline no longer matched: %s / %s (%s)\n' "$known_stem" "$known_module" "$reason" >&2
-      failures=$((failures + 1))
-    fi
-  done < "$KNOWN_FAILURES_FILE"
-fi
-
 {
   printf 'testsuite_commit=%s\n' "$(git -C "$TESTSUITE" rev-parse HEAD 2>/dev/null || printf supplied-unversioned)"
   printf 'wasm_tools=%s\n' "$($WASM_TOOLS_BIN --version)"
   printf 'wast_scripts=%s\n' "$scripts"
   printf 'transformed=%s\n' "$successes"
   printf 'expected_rejections=%s\n' "$rejections"
-  printf 'known_baseline_failures=%s\n' "$known_failures"
   printf 'hard_failures=%s\n' "$failures"
 } | tee "$ARTIFACT_DIR/summary.txt"
 

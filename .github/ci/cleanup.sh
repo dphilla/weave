@@ -209,6 +209,7 @@ is_allowlisted_temp_name() {
     weave-semantic-conformance.?* | \
     weave-rust-guest.?* | \
     weave-spec-corpus.?* | \
+    weave-spec-corpus-test.?* | \
     weave-adversity | weave-adversity.?* | \
     weave-qualification | weave-qualification.?* | \
     weave-go-build.?* | \

@@ -25,7 +25,7 @@ Cargo behavior unless the caller sets that variable too.
 | `cleanup.test.sh` | Isolated containment, symlink, dry-run, and scope checks |
 | `awake-guard.sh` | Shared macOS power assertion for long local entry points |
 | `awake-guard.test.sh` | Isolated platform, bypass, argv, and exit-status checks |
-| `run-unit.sh` | Root Rust, JavaScript, Go, and advisory Rust-quality lanes |
+| `run-unit.sh` | Required Rust-quality, root Rust, JavaScript, and Go lanes |
 | `package-smoke.sh` | Pack, clean-install, and import every reusable JavaScript workspace |
 | `with-timeout.sh` | Portable process-group timeout and forced cleanup |
 | `wait-for.sh` | Suspend-safe process, output, and event condition waits |
@@ -37,7 +37,7 @@ Cargo behavior unless the caller sets that variable too.
 | `native-e2e.sh` | Safe composition used by the legacy `scripts/e2e.sh` shim |
 | `prepare-wamr.sh` | Safe temporary checkout plus immutable WAMR tag verification |
 | `prepare-wasm-tools.sh` | Platform-select and checksum the pinned official corpus tool |
-| `run-wamr.sh` | Independent WAMR workspace build and tests |
+| `run-wamr.sh` | Independent WAMR workspace strict Clippy, tests, and release build |
 | `browser-smoke.sh` | Required Chrome → WAMR → Chrome → WAMR smoke |
 | `browser-peer-smoke.sh` | Required Chrome A → B → A WebRTC smoke with local signaling/STUN |
 | `browser-sidecar-smoke.sh` | Required Chrome → generic Pion sidecar → Wasmtime → Chrome smoke |
@@ -45,7 +45,7 @@ Cargo behavior unless the caller sets that variable too.
 | `adversity.sh` | Protocol failure tests and repeated migration thresholds |
 | `host-service-baseline.sh` | Current built-in host-service behavior tests |
 | `spec-corpus.sh` | Weekly official WebAssembly testsuite transformer smoke |
-| `spec-corpus-known-failures.txt` | Narrow pattern-matched upstream corpus baseline debt |
+| `spec-corpus.test.sh` | Corpus classification regression checks with deterministic fake tools |
 | `qualification.sh` | Deterministic, non-publishing runtime qualification composition |
 | `check-workflows.sh` | Shell syntax, cleanup safety tests, and pinned actionlint validation |
 
@@ -58,6 +58,7 @@ do not use broad `pkill` cleanup.
 From the repository root:
 
 ```sh
+.github/ci/run-unit.sh rust-quality
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
@@ -254,6 +255,7 @@ Release qualification runs both lanes.
 The PR-required lanes are:
 
 - Root Rust tests and release build.
+- Rust formatting and warning-free Clippy.
 - JavaScript core, transport, relay, and browser-smoke unit tests.
 - Go format, vet, tests, and a non-source-tree build.
 - The six-case representative migration suite, including the advertised
@@ -263,11 +265,13 @@ The PR-required lanes are:
 - Checkpoint-file restore in a fresh process.
 - Shell/workflow static validation.
 
-`cargo fmt --check` and strict Clippy are present as a visibly advisory PR job
-because the pre-CI repository baseline currently fails both. Once that debt is
-fixed, remove `continue-on-error` in `pr.yml`; no script or workflow redesign
-is needed. Go race instrumentation is likewise an advisory nightly job until
-it passes on every supported Go/platform combination.
+`run-unit.sh rust-quality` requires formatting in both Rust workspaces and
+warning-free Clippy in the root workspace. It is a required PR job, runs in
+the local/main `all` lane, and is included in release qualification.
+`run-wamr.sh` additionally requires warning-free Clippy for the independent
+WAMR workspace wherever the verified WAMR source is configured. Go race
+instrumentation remains an advisory nightly job until it passes on every
+supported Go/platform combination.
 
 CI currently qualifies the exact current Node and Go pins in `versions.env`.
 The relay's documented Node 18 floor, the wazero adapter's Go 1.22 language
@@ -300,7 +304,7 @@ lifecycle hooks, or a general fencing API. A real plugin conformance suite
 should add those vectors beneath this directory and extend this one entry
 point.
 
-## Corpus replay and baseline maintenance
+## Corpus replay and failure policy
 
 Run a small local sample with:
 
@@ -313,9 +317,15 @@ WEAVE_CORPUS_MIN_SUCCESSES=1 \
 ```
 
 A full run omits `WEAVE_CORPUS_MAX_WAST_FILES`. Only explicit unsupported
-diagnostic families and exact entries in `spec-corpus-known-failures.txt` are
-accepted. New errors and stale baseline entries fail; inspect `report.tsv`,
-then fix the transformer or make the narrowest reviewed baseline change.
+diagnostic families returned with the ordinary error status are accepted.
+There are no known-failure exceptions: unexpected errors, crashes, and invalid
+transformed output fail the run. Inspect `report.tsv` and fix the transformer
+or reject an unsupported input feature before transformation. Crash detection
+takes precedence over unsupported diagnostic text.
+
+`spec-corpus.test.sh`, also run by `check-workflows.sh`, tests this policy with
+deterministic fake tools. It requires no corpus download or Rust compilation
+and checks that the six former baseline exception keys now fail normally.
 
 ## External and generated data policy
 
@@ -330,10 +340,9 @@ then fix the transformer or make the narrowest reviewed baseline change.
   runs intentionally fetch its current default branch and record the exact
   commit in the artifact report so new spec cases are discovered.
 - Expected rejections must use one of the explicit unsupported-feature
-  diagnostics in `spec-corpus.sh`. Post-transform table64/exception failures
-  and one new-GC validation boundary are matched by exact WAST stem, module,
-  and error in `spec-corpus-known-failures.txt`. Every other transform error is
-  a hard failure, and a full run also fails if a baseline entry becomes stale.
+  diagnostics in `spec-corpus.sh`. Every other transform error is a hard
+  failure; corpus names and filenames never exempt a failure. Unsupported
+  table64, exception, and GC features are rejected at the input boundary.
 - Go/Wasm/generated binaries are written to temporary artifact directories,
   never over the tracked source-tree binary.
 

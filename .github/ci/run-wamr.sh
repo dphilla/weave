@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and test the independent WAMR adapter workspace.
+# Lint, build, and test the independent WAMR adapter workspace.
 
 set -euo pipefail
 
@@ -15,5 +15,6 @@ cd "$ROOT"
   exit 1
 }
 
+WAMR_ROOT="$WAMR_ROOT" cargo clippy --locked --manifest-path wamr/Cargo.toml --all-targets -- -D warnings
 WAMR_ROOT="$WAMR_ROOT" cargo test --locked --manifest-path wamr/Cargo.toml
 WAMR_ROOT="$WAMR_ROOT" cargo build --locked --release --manifest-path wamr/Cargo.toml

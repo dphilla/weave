@@ -81,6 +81,7 @@ allowed_names=(
   weave-semantic-conformance.abc123
   weave-rust-guest.abc123
   weave-spec-corpus.abc123
+  weave-spec-corpus-test.abc123
   weave-adversity
   weave-adversity.abc123
   weave-qualification

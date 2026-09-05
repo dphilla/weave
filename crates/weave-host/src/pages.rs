@@ -20,15 +20,10 @@ pub struct PageTracker {
     pub round: u32,
 }
 
+#[derive(Default)]
 pub struct ScanCursor {
     mem: usize,
     page: u64,
-}
-
-impl Default for ScanCursor {
-    fn default() -> Self {
-        ScanCursor { mem: 0, page: 0 }
-    }
 }
 
 pub struct ScanOutput {

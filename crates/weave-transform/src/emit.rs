@@ -12,15 +12,19 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use wasm_encoder::reencode::Reencode;
 use wasm_encoder::{
-    BlockType, ConstExpr, ElementSection, Elements, EntityType, ExportKind, Function,
-    GlobalType, Instruction as I, MemArg, Module, RefType, TableType, ValType,
+    BlockType, ConstExpr, ElementSection, Elements, EntityType, ExportKind, Function, GlobalType,
+    Instruction as I, MemArg, Module, RefType, TableType, ValType,
 };
 use wasmparser::{ElementItems, ElementKind, ExternalKind, Operator};
 use weave_core::meta::{EntryMeta, ImportMeta, Meta};
 use weave_core::names;
 
 fn memarg(offset: u32, align: u32) -> MemArg {
-    MemArg { offset: offset as u64, align, memory_index: 0 }
+    MemArg {
+        offset: offset as u64,
+        align,
+        memory_index: 0,
+    }
 }
 
 /// Index remapper: the `weave.poll` import lands at index `n_imp`, shifting
@@ -53,7 +57,6 @@ fn core_ty(vt: wasmparser::ValType) -> weave_core::ValType {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct SavedGlobal {
     pub global: u32,
@@ -74,10 +77,10 @@ pub struct EntryPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HelperKind {
-    TGrow(u32),
-    TFill(u32),
-    TCopy(u32, u32),
-    TInit(u32, u32),
+    Grow(u32),
+    Fill(u32),
+    Copy(u32, u32),
+    Init(u32, u32),
 }
 
 pub struct Plan {
@@ -209,7 +212,10 @@ fn prescan(pm: &ParsedModule<'_>) -> Result<Vec<Prescan>> {
                     p.any_table_shadow_op = true;
                     p.tfill.insert(table);
                 }
-                Operator::TableCopy { dst_table, src_table } => {
+                Operator::TableCopy {
+                    dst_table,
+                    src_table,
+                } => {
                     p.special = true;
                     p.any_table_shadow_op = true;
                     p.tcopy.insert((dst_table, src_table));
@@ -219,7 +225,9 @@ fn prescan(pm: &ParsedModule<'_>) -> Result<Vec<Prescan>> {
                     p.any_table_shadow_op = true;
                     p.tinit.insert((table, elem_index));
                 }
-                Operator::ElemDrop { .. } | Operator::DataDrop { .. } | Operator::MemoryInit { .. } => {
+                Operator::ElemDrop { .. }
+                | Operator::DataDrop { .. }
+                | Operator::MemoryInit { .. } => {
                     p.special = true;
                 }
                 Operator::GlobalGet { global_index } | Operator::GlobalSet { global_index } => {
@@ -227,7 +235,9 @@ fn prescan(pm: &ParsedModule<'_>) -> Result<Vec<Prescan>> {
                         p.special = true;
                     }
                 }
-                Operator::RefFunc { .. } | Operator::RefNull { .. } | Operator::TypedSelect { .. } => {
+                Operator::RefFunc { .. }
+                | Operator::RefNull { .. }
+                | Operator::TypedSelect { .. } => {
                     // Only matters if the value can persist; persistence paths
                     // (locals across spills, table/global writes) all imply
                     // flattening through other rules. A leaf that briefly
@@ -305,8 +315,7 @@ fn find_recursive(scans: &[Prescan], n_imp: u32) -> Vec<bool> {
                             break;
                         }
                     }
-                    let cyclic = members.len() > 1
-                        || adj[members[0]].contains(&members[0]);
+                    let cyclic = members.len() > 1 || adj[members[0]].contains(&members[0]);
                     if cyclic {
                         for m in members {
                             recursive[m] = true;
@@ -333,10 +342,10 @@ impl Plan {
         }
         // Imported funcref globals cannot be shadowed statically.
         for (i, g) in pm.global_types.iter().enumerate() {
-            if (i as u32) < pm.num_imported_globals {
-                if matches!(g.content_type, wasmparser::ValType::Ref(_)) {
-                    bail!("unsupported: imported funcref global");
-                }
+            if (i as u32) < pm.num_imported_globals
+                && matches!(g.content_type, wasmparser::ValType::Ref(_))
+            {
+                bail!("unsupported: imported funcref global");
             }
         }
         for t in &pm.defined_tables {
@@ -431,22 +440,22 @@ impl Plan {
         inits.sort_unstable();
         inits.dedup();
         for t in grows {
-            helpers.push((HelperKind::TGrow(t), next));
+            helpers.push((HelperKind::Grow(t), next));
             tgrow.insert(t, next);
             next += 1;
         }
         for t in fills {
-            helpers.push((HelperKind::TFill(t), next));
+            helpers.push((HelperKind::Fill(t), next));
             tfill.insert(t, next);
             next += 1;
         }
         for (d, s) in copies {
-            helpers.push((HelperKind::TCopy(d, s), next));
+            helpers.push((HelperKind::Copy(d, s), next));
             tcopy.insert((d, s), next);
             next += 1;
         }
         for (t, e) in inits {
-            helpers.push((HelperKind::TInit(t, e), next));
+            helpers.push((HelperKind::Init(t, e), next));
             tinit.insert((t, e), next);
             next += 1;
         }
@@ -518,14 +527,22 @@ impl Plan {
                 continue;
             }
             let is_ref = matches!(g.content_type, wasmparser::ValType::Ref(_));
-            let key = if is_ref { SlotKey::I32 } else { SlotKey::of(g.content_type) };
+            let key = if is_ref {
+                SlotKey::I32
+            } else {
+                SlotKey::of(g.content_type)
+            };
             let sz = key.byte_size();
             off = (off + sz - 1) & !(sz - 1);
             saved_globals.push(SavedGlobal {
                 global: i as u32,
                 key,
                 off,
-                shadow: if is_ref { Some(shadow_globals[&(i as u32)]) } else { None },
+                shadow: if is_ref {
+                    Some(shadow_globals[&(i as u32)])
+                } else {
+                    None
+                },
             });
             off += sz;
         }
@@ -652,10 +669,17 @@ pub fn emit(
         [ValType::I32],
     ); // t_tgrow
     types.ty().function(
-        [ValType::I32, ValType::Ref(RefType::FUNCREF), ValType::I32, ValType::I32],
+        [
+            ValType::I32,
+            ValType::Ref(RefType::FUNCREF),
+            ValType::I32,
+            ValType::I32,
+        ],
         [],
     ); // t_tfill
-    types.ty().function([ValType::I32, ValType::I32, ValType::I32], []); // t_3i
+    types
+        .ty()
+        .function([ValType::I32, ValType::I32, ValType::I32], []); // t_3i
     types.ty().function([ValType::I32], [ValType::I32]); // t_memory_grow
     module.section(&types);
 
@@ -663,10 +687,14 @@ pub fn emit(
     let mut imports = wasm_encoder::ImportSection::new();
     for imp in &pm.raw_imports {
         remap
-            .parse_import(&mut imports, imp.clone())
+            .parse_import(&mut imports, *imp)
             .map_err(|e| anyhow!("import reencode: {e:?}"))?;
     }
-    imports.import(names::IMPORT_MODULE, names::IMPORT_POLL, EntityType::Function(plan.t_poll));
+    imports.import(
+        names::IMPORT_MODULE,
+        names::IMPORT_POLL,
+        EntityType::Function(plan.t_poll),
+    );
     module.section(&imports);
 
     // ---- functions ----
@@ -692,9 +720,9 @@ pub fn emit(
     }
     for (kind, _) in &plan.helpers {
         let ti = match kind {
-            HelperKind::TGrow(_) => plan.t_tgrow,
-            HelperKind::TFill(_) => plan.t_tfill,
-            HelperKind::TCopy(..) | HelperKind::TInit(..) => plan.t_3i,
+            HelperKind::Grow(_) => plan.t_tgrow,
+            HelperKind::Fill(_) => plan.t_tfill,
+            HelperKind::Copy(..) | HelperKind::Init(..) => plan.t_3i,
         };
         funcs.function(ti);
     }
@@ -746,7 +774,11 @@ pub fn emit(
             .parse_global(&mut globals, g.clone())
             .map_err(|e| anyhow!("global reencode: {e:?}"))?;
     }
-    let i32_mut = GlobalType { val_type: ValType::I32, mutable: true, shared: false };
+    let i32_mut = GlobalType {
+        val_type: ValType::I32,
+        mutable: true,
+        shared: false,
+    };
     // state, flag, entry, ctr, sp, stack_base, stack_end, rbase
     globals.global(i32_mut, &ConstExpr::i32_const(names::STATE_RUN));
     globals.global(i32_mut, &ConstExpr::i32_const(names::FLAG_DONE));
@@ -984,7 +1016,11 @@ pub fn emit(
                 }
             })
             .collect(),
-        control_globals: plan.control_globals.iter().map(|(n, _)| n.clone()).collect(),
+        control_globals: plan
+            .control_globals
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect(),
         globals_area_size: plan.globals_area,
         results_area_size: plan.results_area,
     };
@@ -993,7 +1029,10 @@ pub fn emit(
         data: Cow::from(meta.encode()),
     });
 
-    Ok(TransformOutput { wasm: module.finish(), meta })
+    Ok(TransformOutput {
+        wasm: module.finish(),
+        meta,
+    })
 }
 
 // ---------------- generated runtime functions ----------------
@@ -1076,7 +1115,10 @@ fn gen_stack_grow(plan: &Plan) -> Function {
     f.instruction(&I::GlobalGet(plan.g_sp));
     f.instruction(&I::GlobalGet(plan.g_stack_base));
     f.instruction(&I::I32Sub);
-    f.instruction(&I::MemoryCopy { dst_mem: 0, src_mem: 0 });
+    f.instruction(&I::MemoryCopy {
+        dst_mem: 0,
+        src_mem: 0,
+    });
     // rebase sp/base/end
     f.instruction(&I::LocalGet(new_base));
     f.instruction(&I::GlobalGet(plan.g_sp));
@@ -1248,7 +1290,10 @@ fn gen_init(plan: &Plan, pm: &ParsedModule<'_>, remap: &mut Remap) -> Result<Fun
     f.instruction(&I::Return);
     f.instruction(&I::End);
     // allocate the region
-    let pages = plan.region_size.div_ceil(weave_core::WASM_PAGE_SIZE as u32).max(1);
+    let pages = plan
+        .region_size
+        .div_ceil(weave_core::WASM_PAGE_SIZE as u32)
+        .max(1);
     f.instruction(&I::I32Const(pages as i32));
     f.instruction(&I::MemoryGrow(0));
     f.instruction(&I::LocalTee(old));
@@ -1297,7 +1342,11 @@ fn gen_init(plan: &Plan, pm: &ParsedModule<'_>, remap: &mut Remap) -> Result<Fun
         }
         // seed shadows from active element segments
         for e in pm.elements.iter() {
-            let ElementKind::Active { table_index, offset_expr } = &e.kind else {
+            let ElementKind::Active {
+                table_index,
+                offset_expr,
+            } = &e.kind
+            else {
                 continue;
             };
             let t = table_index.unwrap_or(0) as usize;
@@ -1476,7 +1525,7 @@ fn gen_helper(
 ) -> Result<Function> {
     let _ = pm;
     Ok(match kind {
-        HelperKind::TGrow(t) => {
+        HelperKind::Grow(t) => {
             // params: 0 v(funcref), 1 vsh, 2 n. locals: 3 old, 4 newcap, 5 newptr, 6 k
             let mut f = Function::new([(4, ValType::I32)]);
             let (v, vsh, n, old, newcap, newptr, k) = (0, 1, 2, 3, 4, 5, 6);
@@ -1545,7 +1594,10 @@ fn gen_helper(
                 f.instruction(&I::LocalGet(old));
                 f.instruction(&I::I32Const(2));
                 f.instruction(&I::I32Shl);
-                f.instruction(&I::MemoryCopy { dst_mem: 0, src_mem: 0 });
+                f.instruction(&I::MemoryCopy {
+                    dst_mem: 0,
+                    src_mem: 0,
+                });
                 f.instruction(&I::LocalGet(newptr));
                 f.instruction(&I::GlobalSet(plan.g_tshadow[t as usize]));
                 f.instruction(&I::LocalGet(newcap));
@@ -1581,7 +1633,7 @@ fn gen_helper(
             f.instruction(&I::End);
             f
         }
-        HelperKind::TFill(t) => {
+        HelperKind::Fill(t) => {
             // params: 0 i, 1 v(funcref), 2 vsh, 3 n. locals: 4 k
             let mut f = Function::new([(1, ValType::I32)]);
             let (i, v, vsh, n, k) = (0, 1, 2, 3, 4);
@@ -1616,14 +1668,17 @@ fn gen_helper(
             f.instruction(&I::End);
             f
         }
-        HelperKind::TCopy(dt, st) => {
+        HelperKind::Copy(dt, st) => {
             // params: 0 d, 1 s, 2 n
             let mut f = Function::new([]);
             let (d, s, n) = (0, 1, 2);
             f.instruction(&I::LocalGet(d));
             f.instruction(&I::LocalGet(s));
             f.instruction(&I::LocalGet(n));
-            f.instruction(&I::TableCopy { dst_table: dt, src_table: st });
+            f.instruction(&I::TableCopy {
+                dst_table: dt,
+                src_table: st,
+            });
             // shadow copy (memory.copy handles overlap identically)
             f.instruction(&I::LocalGet(d));
             f.instruction(&I::I32Const(2));
@@ -1638,11 +1693,14 @@ fn gen_helper(
             f.instruction(&I::LocalGet(n));
             f.instruction(&I::I32Const(2));
             f.instruction(&I::I32Shl);
-            f.instruction(&I::MemoryCopy { dst_mem: 0, src_mem: 0 });
+            f.instruction(&I::MemoryCopy {
+                dst_mem: 0,
+                src_mem: 0,
+            });
             f.instruction(&I::End);
             f
         }
-        HelperKind::TInit(t, e) => {
+        HelperKind::Init(t, e) => {
             // params: 0 d, 1 s, 2 n
             let mut f = Function::new([]);
             let (d, s, n) = (0, 1, 2);
@@ -1670,7 +1728,10 @@ fn gen_helper(
             f.instruction(&I::LocalGet(d));
             f.instruction(&I::LocalGet(s));
             f.instruction(&I::LocalGet(n));
-            f.instruction(&I::TableInit { elem_index: e, table: t });
+            f.instruction(&I::TableInit {
+                elem_index: e,
+                table: t,
+            });
             // shadow: memory.init(dst = tshadow + d*4, src = s*4, len = n*4)
             f.instruction(&I::LocalGet(d));
             f.instruction(&I::I32Const(2));
@@ -1683,7 +1744,10 @@ fn gen_helper(
             f.instruction(&I::LocalGet(n));
             f.instruction(&I::I32Const(2));
             f.instruction(&I::I32Shl);
-            f.instruction(&I::MemoryInit { mem: 0, data_index: shadow_seg });
+            f.instruction(&I::MemoryInit {
+                mem: 0,
+                data_index: shadow_seg,
+            });
             f.instruction(&I::End);
             f.instruction(&I::End);
             f

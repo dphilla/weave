@@ -33,9 +33,22 @@ fn linker(engine: &Engine) -> Linker<HostState> {
 }
 
 /// Run transformed module uninterrupted → (results, emitted).
-fn golden(engine: &Engine, wasm: &[u8], entry: &str, args: &[Val], nres: usize) -> (Vec<String>, Vec<i64>) {
+fn golden(
+    engine: &Engine,
+    wasm: &[u8],
+    entry: &str,
+    args: &[Val],
+    nres: usize,
+) -> (Vec<String>, Vec<i64>) {
     let module = Module::new(engine, wasm).unwrap();
-    let mut store = Store::new(engine, HostState { emitted: vec![], polls: 0, unwind_at: None });
+    let mut store = Store::new(
+        engine,
+        HostState {
+            emitted: vec![],
+            polls: 0,
+            unwind_at: None,
+        },
+    );
     let inst = linker(engine).instantiate(&mut store, &module).unwrap();
     inst.get_func(&mut store, names::F_INIT)
         .unwrap()
@@ -44,7 +57,10 @@ fn golden(engine: &Engine, wasm: &[u8], entry: &str, args: &[Val], nres: usize) 
     let f = inst.get_func(&mut store, entry).unwrap();
     let mut res = vec![Val::I32(0); nres];
     f.call(&mut store, args, &mut res).unwrap();
-    (res.iter().map(|v| format!("{v:?}")).collect(), store.data().emitted.clone())
+    (
+        res.iter().map(|v| format!("{v:?}")).collect(),
+        store.data().emitted.clone(),
+    )
 }
 
 /// Checkpoint at poll #k, restore into a fresh instance, run to completion.
@@ -59,7 +75,11 @@ fn checkpointed(
     let module = Module::new(engine, wasm)?;
     let mut store = Store::new(
         engine,
-        HostState { emitted: vec![], polls: 0, unwind_at: Some(unwind_at) },
+        HostState {
+            emitted: vec![],
+            polls: 0,
+            unwind_at: Some(unwind_at),
+        },
     );
     let inst = linker(engine).instantiate(&mut store, &module)?;
     inst.get_func(&mut store, names::F_INIT)
@@ -68,10 +88,20 @@ fn checkpointed(
     let f = inst
         .get_func(&mut store, entry)
         .ok_or_else(|| anyhow!("no export"))?;
-    let nres = meta.entries.iter().find(|e| e.name == entry).unwrap().results.len();
+    let nres = meta
+        .entries
+        .iter()
+        .find(|e| e.name == entry)
+        .unwrap()
+        .results
+        .len();
     let mut res = vec![Val::I32(0); nres];
     f.call(&mut store, args, &mut res)?;
-    assert_eq!(get_g(&mut store, &inst, names::G_FLAG), names::FLAG_UNWOUND, "did not unwind");
+    assert_eq!(
+        get_g(&mut store, &inst, names::G_FLAG),
+        names::FLAG_UNWOUND,
+        "did not unwind"
+    );
 
     // capture
     let mem = inst.get_memory(&mut store, &meta.memories[0]).unwrap();
@@ -87,7 +117,11 @@ fn checkpointed(
     // restore into fresh instance
     let mut store2 = Store::new(
         engine,
-        HostState { emitted: emitted_pre, polls: 0, unwind_at: None },
+        HostState {
+            emitted: emitted_pre,
+            polls: 0,
+            unwind_at: None,
+        },
     );
     let inst2 = linker(engine).instantiate(&mut store2, &module)?;
     let mem2 = inst2.get_memory(&mut store2, &meta.memories[0]).unwrap();
@@ -124,16 +158,28 @@ fn checkpointed(
             let off = roff + i * 16;
             match ty {
                 weave_core::ValType::I32 => {
-                    format!("{:?}", Val::I32(i32::from_le_bytes(data[off..off + 4].try_into().unwrap())))
+                    format!(
+                        "{:?}",
+                        Val::I32(i32::from_le_bytes(data[off..off + 4].try_into().unwrap()))
+                    )
                 }
                 weave_core::ValType::I64 => {
-                    format!("{:?}", Val::I64(i64::from_le_bytes(data[off..off + 8].try_into().unwrap())))
+                    format!(
+                        "{:?}",
+                        Val::I64(i64::from_le_bytes(data[off..off + 8].try_into().unwrap()))
+                    )
                 }
                 weave_core::ValType::F64 => {
-                    format!("{:?}", Val::F64(u64::from_le_bytes(data[off..off + 8].try_into().unwrap())))
+                    format!(
+                        "{:?}",
+                        Val::F64(u64::from_le_bytes(data[off..off + 8].try_into().unwrap()))
+                    )
                 }
                 weave_core::ValType::F32 => {
-                    format!("{:?}", Val::F32(u32::from_le_bytes(data[off..off + 4].try_into().unwrap())))
+                    format!(
+                        "{:?}",
+                        Val::F32(u32::from_le_bytes(data[off..off + 4].try_into().unwrap()))
+                    )
                 }
                 other => panic!("unexpected {other:?}"),
             }
@@ -153,7 +199,14 @@ fn case(wat_src: &str, entry: &str, args: &[Val], unwind_at: u64) {
     let wasm = wat::parse_str(wat_src).unwrap();
     let out = weave_transform::transform(&wasm, &Default::default()).unwrap();
     let engine = Engine::new(&Config::new()).unwrap();
-    let nres = out.meta.entries.iter().find(|e| e.name == entry).unwrap().results.len();
+    let nres = out
+        .meta
+        .entries
+        .iter()
+        .find(|e| e.name == entry)
+        .unwrap()
+        .results
+        .len();
     let (gr, ge) = golden(&engine, &out.wasm, entry, args, nres);
     let (cr, ce) = checkpointed(&engine, &out.wasm, &out.meta, entry, args, unwind_at).unwrap();
     assert_eq!(gr, cr, "results differ for {entry}");
@@ -248,9 +301,19 @@ fn passive_segments_gating() {
     let wasm = wat::parse_str(WAT_TRAP).unwrap();
     let out = weave_transform::transform(&wasm, &Default::default()).unwrap();
     let engine = Engine::new(&Config::new()).unwrap();
-    let res = checkpointed(&engine, &out.wasm, &out.meta, "run", &[Val::I32(100_000)], 2);
+    let res = checkpointed(
+        &engine,
+        &out.wasm,
+        &out.meta,
+        "run",
+        &[Val::I32(100_000)],
+        2,
+    );
     let err = res.expect_err("memory.init after data.drop must trap after restore");
-    assert!(format!("{err:#}").contains("unreachable"), "wrong trap: {err:#}");
+    assert!(
+        format!("{err:#}").contains("unreachable"),
+        "wrong trap: {err:#}"
+    );
 }
 
 /// v128 state live across a checkpoint (SIMD lane arithmetic mid-loop).

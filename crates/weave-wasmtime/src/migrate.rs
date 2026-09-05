@@ -7,7 +7,7 @@
 //!
 //! Target: accept the stream into a fresh instance and resume it.
 
-use crate::instance::{WeaveInstance, WorkResult};
+use crate::instance::{ServiceFactory, WeaveInstance, WorkResult};
 use crate::poll::Poller;
 use crate::WeaveModule;
 use anyhow::{anyhow, bail, Context, Result};
@@ -117,8 +117,7 @@ pub struct TargetFactory<'a> {
     /// Look up / cache transformed modules by hash.
     pub modules: std::collections::HashMap<[u8; 32], WeaveModule>,
     /// Build the host services for a new instance.
-    pub make_services:
-        Box<dyn FnMut() -> (Vec<Box<dyn HostService>>, Vec<Box<dyn Any + Send>>) + 'a>,
+    pub make_services: ServiceFactory<'a>,
     /// Install the workload's non-weave imports.
     pub make_link: Box<dyn FnMut() -> crate::instance::LinkFn + 'a>,
 }

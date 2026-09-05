@@ -12,8 +12,10 @@ use weave_host::source::SourceMigration;
 use weave_host::MemRead;
 
 /// What the next `poll` should do.
+#[derive(Default)]
 pub enum Poller {
     /// Keep running; never request an unwind.
+    #[default]
     Run,
     /// Request an unwind on the next poll (plain checkpoint).
     UnwindNext,
@@ -27,12 +29,6 @@ pub enum Poller {
     },
     /// A migration step failed; unwind so the caller can rewind locally.
     Errored(String),
-}
-
-impl Default for Poller {
-    fn default() -> Self {
-        Poller::Run
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

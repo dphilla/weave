@@ -9,8 +9,8 @@
 
 pub mod instance;
 pub mod migrate;
-pub mod serve;
 pub mod poll;
+pub mod serve;
 
 pub use instance::{Ctx, LinkFn, WeaveInstance, WorkResult};
 pub use poll::Poller;
@@ -44,7 +44,11 @@ impl WeaveModule {
     /// Wrap an already-transformed module (e.g. received over the wire).
     pub fn from_transformed(wasm: Vec<u8>, meta: Meta) -> WeaveModule {
         let module_hash = weave_core::sha256::sha256(&wasm);
-        WeaveModule { wasm: Arc::new(wasm), meta: Arc::new(meta), module_hash }
+        WeaveModule {
+            wasm: Arc::new(wasm),
+            meta: Arc::new(meta),
+            module_hash,
+        }
     }
 }
 

@@ -6,12 +6,12 @@
 //! locally and finishes as if nothing happened.
 
 use anyhow::Result;
-use std::any::Any;
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Val};
 use weave_host::source::SourceOptions;
 use weave_host::{HostService, MemRead};
+use weave_wasmtime::instance::{LinkFn, ServiceSet};
 use weave_wasmtime::migrate::{accept_conn, migrate_running, MigrateOutcome, TargetFactory};
 use weave_wasmtime::{default_engine, WeaveInstance, WeaveModule, WorkResult};
 
@@ -87,13 +87,7 @@ impl HostService for EmitService {
     }
 }
 
-fn make_instance_parts(
-    log: Arc<Mutex<EmitLog>>,
-) -> (
-    Vec<Box<dyn HostService>>,
-    Vec<Box<dyn Any + Send>>,
-    weave_wasmtime::instance::LinkFn,
-) {
+fn make_instance_parts(log: Arc<Mutex<EmitLog>>) -> (ServiceSet, LinkFn) {
     let services: Vec<Box<dyn HostService>> = vec![Box::new(EmitService { log: log.clone() })];
     let link_log = log;
     let link: weave_wasmtime::instance::LinkFn = Box::new(move |linker: &mut Linker<_>| {
@@ -109,7 +103,7 @@ fn make_instance_parts(
         )?;
         Ok(())
     });
-    (services, vec![], link)
+    ((services, vec![]), link)
 }
 
 fn woven() -> WeaveModule {
@@ -124,7 +118,7 @@ fn golden() -> (i64, EmitLog) {
     let engine = default_engine().unwrap();
     let module = woven();
     let log = Arc::new(Mutex::new(EmitLog::default()));
-    let (services, any, link) = make_instance_parts(log.clone());
+    let ((services, any), link) = make_instance_parts(log.clone());
     let mut inst = WeaveInstance::new_fresh(&engine, &module, services, any, link).unwrap();
     let out = inst.call_entry("run", &[Val::I32(N)]).unwrap();
     match out {
@@ -167,7 +161,7 @@ fn live_migration_wasmtime_to_wasmtime() {
             make_link: Box::new({
                 let dst_log3 = dst_log.clone();
                 move || {
-                    let (_, _, link) = make_instance_parts(dst_log3.clone());
+                    let (_, link) = make_instance_parts(dst_log3.clone());
                     link
                 }
             }),
@@ -189,7 +183,7 @@ fn live_migration_wasmtime_to_wasmtime() {
 
     // Source: start running, then migrate mid-flight.
     let src_log = Arc::new(Mutex::new(EmitLog::default()));
-    let (services, any, link) = make_instance_parts(src_log.clone());
+    let ((services, any), link) = make_instance_parts(src_log.clone());
     let mut inst = WeaveInstance::new_fresh(&engine_src, &module, services, any, link).unwrap();
     let opts = SourceOptions {
         budget_bytes: 1 << 20,
@@ -291,7 +285,7 @@ fn migration_failure_rolls_back_and_continues() {
     });
 
     let log = Arc::new(Mutex::new(EmitLog::default()));
-    let (services, any, link) = make_instance_parts(log.clone());
+    let ((services, any), link) = make_instance_parts(log.clone());
     let mut inst = WeaveInstance::new_fresh(&engine, &module, services, any, link).unwrap();
     let res = migrate_running(
         &mut inst,

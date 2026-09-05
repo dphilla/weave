@@ -3,12 +3,11 @@
 //! migrated in — the symmetric peer-to-peer unit. A node that received a
 //! workload can later migrate it onward (A → B → C chains).
 
-use crate::instance::{LinkFn, WeaveInstance, WorkResult};
+use crate::instance::{LinkFn, ServiceFactory, WeaveInstance, WorkResult};
 use crate::migrate::{accept_conn, TargetFactory};
 use crate::poll::Poller;
 use crate::WeaveModule;
 use anyhow::{Context, Result};
-use std::any::Any;
 use std::io::{BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -16,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, Val};
 use weave_core::wire::Frame;
 use weave_host::source::SourceOptions;
-use weave_host::HostService;
 
 /// Cross-thread migration control, checked by `weave.poll` while running.
 pub struct Shared {
@@ -77,8 +75,7 @@ pub struct NodeConfig {
 /// Factories the node uses to build service sets for fresh or received
 /// instances (both peers must register the same service names).
 pub struct NodeFactories<'a> {
-    pub make_services:
-        Box<dyn FnMut() -> (Vec<Box<dyn HostService>>, Vec<Box<dyn Any + Send>>) + 'a>,
+    pub make_services: ServiceFactory<'a>,
     pub make_link: Box<dyn FnMut() -> LinkFn + 'a>,
 }
 

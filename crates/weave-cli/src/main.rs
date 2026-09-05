@@ -162,7 +162,10 @@ fn extract_meta(wasm: &[u8]) -> Result<Meta> {
 
 fn cmd_transform(args: &Args) -> Result<()> {
     let input = args.positional.first().ok_or_else(|| anyhow!(USAGE))?;
-    let out = args.flag("o").or(args.flag("out")).ok_or_else(|| anyhow!("missing -o"))?;
+    let out = args
+        .flag("o")
+        .or(args.flag("out"))
+        .ok_or_else(|| anyhow!("missing -o"))?;
     let bytes = std::fs::read(input).with_context(|| format!("reading {input}"))?;
     let bytes = if input.ends_with(".wat") {
         wat::parse_bytes(&bytes)?.into_owned()
@@ -238,15 +241,23 @@ impl ServiceSet {
 
     fn services(&self) -> Vec<Box<dyn HostService>> {
         vec![
-            Box::new(EmitSvc { name: "env.emit", state: self.emit.clone() }),
-            Box::new(EmitSvc { name: "env.emit32", state: self.emit32.clone() }),
-            Box::new(EmitSvc { name: "env.emit64", state: self.emit64.clone() }),
+            Box::new(EmitSvc {
+                name: "env.emit",
+                state: self.emit.clone(),
+            }),
+            Box::new(EmitSvc {
+                name: "env.emit32",
+                state: self.emit32.clone(),
+            }),
+            Box::new(EmitSvc {
+                name: "env.emit64",
+                state: self.emit64.clone(),
+            }),
         ]
     }
 
     fn link(&self) -> LinkFn {
-        let (emit, emit32, emit64) =
-            (self.emit.clone(), self.emit32.clone(), self.emit64.clone());
+        let (emit, emit32, emit64) = (self.emit.clone(), self.emit32.clone(), self.emit64.clone());
         Box::new(move |linker| {
             let st = emit.clone();
             linker.func_wrap(
@@ -310,7 +321,11 @@ fn parse_entry_args(meta: &Meta, entry: &str, raw: &[String]) -> Result<Vec<Val>
         .map(|i| &meta.entries[i])
         .ok_or_else(|| anyhow!("module has no entry {entry}"))?;
     if e.params.len() != raw.len() {
-        bail!("entry {entry} takes {} args, got {}", e.params.len(), raw.len());
+        bail!(
+            "entry {entry} takes {} args, got {}",
+            e.params.len(),
+            raw.len()
+        );
     }
     e.params
         .iter()
@@ -343,14 +358,15 @@ fn print_done(vals: &[Val]) {
 
 fn cmd_run(args: &Args) -> Result<()> {
     let path = args.positional.first().ok_or_else(|| anyhow!(USAGE))?;
-    let entry = args.flag("invoke").ok_or_else(|| anyhow!("missing --invoke"))?;
+    let entry = args
+        .flag("invoke")
+        .ok_or_else(|| anyhow!("missing --invoke"))?;
     let module = load_module(path, args)?;
     check_imports(&module.meta)?;
     let call_args = parse_entry_args(&module.meta, entry, &args.multi("arg"))?;
     let engine = default_engine()?;
     let set = ServiceSet::new();
-    let mut inst =
-        WeaveInstance::new_fresh(&engine, &module, set.services(), vec![], set.link())?;
+    let mut inst = WeaveInstance::new_fresh(&engine, &module, set.services(), vec![], set.link())?;
     match inst.call_entry(entry, &call_args)? {
         WorkResult::Done(vals) => {
             print_done(&vals);
@@ -362,7 +378,9 @@ fn cmd_run(args: &Args) -> Result<()> {
 
 fn cmd_checkpoint(args: &Args) -> Result<()> {
     let path = args.positional.first().ok_or_else(|| anyhow!(USAGE))?;
-    let entry = args.flag("invoke").ok_or_else(|| anyhow!("missing --invoke"))?;
+    let entry = args
+        .flag("invoke")
+        .ok_or_else(|| anyhow!("missing --invoke"))?;
     let after: u64 = args
         .flag("after-polls")
         .ok_or_else(|| anyhow!("missing --after-polls"))?
@@ -373,8 +391,7 @@ fn cmd_checkpoint(args: &Args) -> Result<()> {
     let call_args = parse_entry_args(&module.meta, entry, &args.multi("arg"))?;
     let engine = default_engine()?;
     let set = ServiceSet::new();
-    let mut inst =
-        WeaveInstance::new_fresh(&engine, &module, set.services(), vec![], set.link())?;
+    let mut inst = WeaveInstance::new_fresh(&engine, &module, set.services(), vec![], set.link())?;
     inst.set_poller(weave_wasmtime::Poller::UnwindAfter(after));
     match inst.call_entry(entry, &call_args)? {
         WorkResult::Done(vals) => {
@@ -424,16 +441,24 @@ fn cmd_restore(args: &Args) -> Result<()> {
 }
 
 fn cmd_serve(args: &Args) -> Result<()> {
-    let listen = args.flag("listen").ok_or_else(|| anyhow!("missing --listen"))?;
+    let listen = args
+        .flag("listen")
+        .ok_or_else(|| anyhow!("missing --listen"))?;
     let engine = default_engine()?;
     let set = ServiceSet::new();
     let initial = match args.flag("module") {
         Some(path) => {
-            let entry = args.flag("invoke").ok_or_else(|| anyhow!("missing --invoke"))?;
+            let entry = args
+                .flag("invoke")
+                .ok_or_else(|| anyhow!("missing --invoke"))?;
             let module = load_module(path, args)?;
             check_imports(&module.meta)?;
             let call_args = parse_entry_args(&module.meta, entry, &args.multi("arg"))?;
-            Some(InitialWork { module, entry: entry.to_string(), args: call_args })
+            Some(InitialWork {
+                module,
+                entry: entry.to_string(),
+                args: call_args,
+            })
         }
         None => None,
     };
@@ -470,7 +495,10 @@ fn cmd_ctl(args: &Args, migrate: bool) -> Result<()> {
     let mut r = BufReader::new(conn);
     if migrate {
         let to = args.flag("to").ok_or_else(|| anyhow!("missing --to"))?;
-        Frame::CtlMigrate { target: to.to_string() }.write_to(&mut w)?;
+        Frame::CtlMigrate {
+            target: to.to_string(),
+        }
+        .write_to(&mut w)?;
     } else {
         Frame::CtlStatus.write_to(&mut w)?;
     }

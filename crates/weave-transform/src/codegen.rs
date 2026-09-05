@@ -11,11 +11,18 @@ use wasm_encoder::{
 use weave_core::names;
 
 pub fn funcref_null() -> I<'static> {
-    I::RefNull(HeapType::Abstract { shared: false, ty: AbstractHeapType::Func })
+    I::RefNull(HeapType::Abstract {
+        shared: false,
+        ty: AbstractHeapType::Func,
+    })
 }
 
 fn memarg(offset: u32, align: u32) -> MemArg {
-    MemArg { offset: offset as u64, align, memory_index: 0 }
+    MemArg {
+        offset: offset as u64,
+        align,
+        memory_index: 0,
+    }
 }
 
 /// One spilled local: `local` is stored/loaded at `off` with width `key`
@@ -69,11 +76,19 @@ impl FrameLayout {
             }
             let sz = key.byte_size();
             off = (off + sz - 1) & !(sz - 1);
-            entries.push(SpillEntry { local: idx, key, off });
+            entries.push(SpillEntry {
+                local: idx,
+                key,
+                off,
+            });
             off += sz;
         }
         let size = (off + 15) & !15;
-        FrameLayout { entries, rebuilds, size }
+        FrameLayout {
+            entries,
+            rebuilds,
+            size,
+        }
     }
 }
 
@@ -137,9 +152,12 @@ fn preallocate_slots(fl: &mut Flattened<'_>) {
                 | Ins::ShadowToLocal { slot, .. }
                 | Ins::ShadowFromGlobal { slot, .. }
                 | Ins::ShadowToGlobal { slot, .. } => slots.push(*slot),
-                Ins::ShadowSelect { cond, on_true, on_false, out } => {
-                    slots.extend([*cond, *on_true, *on_false, *out])
-                }
+                Ins::ShadowSelect {
+                    cond,
+                    on_true,
+                    on_false,
+                    out,
+                } => slots.extend([*cond, *on_true, *on_false, *out]),
                 Ins::ShadowTableGet { idx, out, .. } => slots.extend([*idx, *out]),
                 Ins::ShadowTableSet { idx, val, .. } => slots.extend([*idx, *val]),
                 Ins::SegDropFlag { .. } => {}
@@ -177,13 +195,9 @@ pub struct Codegen<'p> {
     pub results: Vec<SlotKey>,
 }
 
-impl<'p> Codegen<'p> {
+impl Codegen<'_> {
     /// Emit a complete function body for `fl`.
-    pub fn emit(
-        &self,
-        fl: &mut Flattened<'_>,
-        remap: &mut crate::emit::Remap,
-    ) -> Result<Function> {
+    pub fn emit(&self, fl: &mut Flattened<'_>, remap: &mut crate::emit::Remap) -> Result<Function> {
         // All slot locals must exist before the frame layout is computed, so
         // that the layout used by the rewind prologue is identical to the one
         // used by every spill site.
@@ -276,7 +290,7 @@ impl<'p> Codegen<'p> {
 
         for k in 0..n {
             f.instruction(&I::End); // close wrapper x_k: block k's code follows
-            self.emit_block(&mut f, fl, &layout, remap, k, n, pc)?;
+            self.emit_block(&mut f, fl, &layout, remap, k, pc)?;
         }
         f.instruction(&I::End); // loop
         f.instruction(&I::End); // $bad
@@ -304,9 +318,9 @@ impl<'p> Codegen<'p> {
         layout: &FrameLayout,
         remap: &mut crate::emit::Remap,
         k: usize,
-        n: usize,
         pc: u32,
     ) -> Result<()> {
+        let n = fl.blocks.len();
         // Sites first (the block's pc re-enters exactly here on rewind).
         match &fl.blocks[k].site {
             Some(Site::Poll) => {
@@ -375,7 +389,11 @@ impl<'p> Codegen<'p> {
                 f.instruction(&I::End);
                 f.instruction(&I::Unreachable);
             }
-            Term::TableGoto { index, ref targets, default } => {
+            Term::TableGoto {
+                index,
+                ref targets,
+                default,
+            } => {
                 let targets = targets.clone();
                 let m = targets.len() as u32;
                 for _ in 0..=m {
@@ -472,19 +490,30 @@ impl<'p> Codegen<'p> {
                 f.instruction(&I::LocalGet(sh));
                 f.instruction(&I::LocalSet(sh_local));
             }
-            Ins::ShadowFromGlobal { shadow_global, slot } => {
+            Ins::ShadowFromGlobal {
+                shadow_global,
+                slot,
+            } => {
                 let (g, slot) = (*shadow_global, *slot);
                 let sh = fl.locals.slot_shadow_local(slot);
                 f.instruction(&I::GlobalGet(g));
                 f.instruction(&I::LocalSet(sh));
             }
-            Ins::ShadowToGlobal { slot, shadow_global } => {
+            Ins::ShadowToGlobal {
+                slot,
+                shadow_global,
+            } => {
                 let (slot, g) = (*slot, *shadow_global);
                 let sh = fl.locals.slot_shadow_local(slot);
                 f.instruction(&I::LocalGet(sh));
                 f.instruction(&I::GlobalSet(g));
             }
-            Ins::ShadowSelect { cond, on_true, on_false, out } => {
+            Ins::ShadowSelect {
+                cond,
+                on_true,
+                on_false,
+                out,
+            } => {
                 let (cond, a, b, out) = (*cond, *on_true, *on_false, *out);
                 let (sa, sb) = (
                     fl.locals.slot_shadow_local(a),
@@ -528,7 +557,14 @@ impl<'p> Codegen<'p> {
                 f.instruction(&I::I32Const(1));
                 f.instruction(&I::I32Store8(memarg(off, 0)));
             }
-            Ins::GatedMemInit { data, flag_off, dst, src, len, mem } => {
+            Ins::GatedMemInit {
+                data,
+                flag_off,
+                dst,
+                src,
+                len,
+                mem,
+            } => {
                 let (data, off, dst, src, len, mem) = (*data, *flag_off, *dst, *src, *len, *mem);
                 let (ld, ls, ll) = (
                     fl.locals.slot_local(dst),
@@ -562,7 +598,10 @@ impl<'p> Codegen<'p> {
                 f.instruction(&I::LocalGet(ld));
                 f.instruction(&I::LocalGet(ls));
                 f.instruction(&I::LocalGet(ll));
-                f.instruction(&I::MemoryInit { mem, data_index: data });
+                f.instruction(&I::MemoryInit {
+                    mem,
+                    data_index: data,
+                });
                 f.instruction(&I::End);
             }
             Ins::HelperCall { helper, args, out } => {

@@ -47,6 +47,12 @@ pub enum WorkResult {
 /// A callback that installs the workload's non-weave host imports.
 pub type LinkFn = Box<dyn FnMut(&mut Linker<Ctx>) -> Result<()>>;
 
+/// Migratable services and their associated application-owned state handles.
+pub type ServiceSet = (Vec<Box<dyn HostService>>, Vec<Box<dyn Any + Send>>);
+
+/// Construct a fresh service set for a new or incoming workload.
+pub type ServiceFactory<'a> = Box<dyn FnMut() -> ServiceSet + 'a>;
+
 pub struct WeaveInstance {
     pub module: WeaveModule,
     store: Store<Ctx>,

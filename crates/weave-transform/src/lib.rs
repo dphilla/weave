@@ -40,8 +40,8 @@
 mod codegen;
 mod emit;
 mod flatten;
-mod module;
 mod memory;
+mod module;
 
 use anyhow::{Context, Result};
 use weave_core::Meta;
@@ -58,7 +58,10 @@ pub struct TransformOptions {
 
 impl Default for TransformOptions {
     fn default() -> Self {
-        TransformOptions { poll_period: 512, stack_pages: 16 }
+        TransformOptions {
+            poll_period: 512,
+            stack_pages: 16,
+        }
     }
 }
 

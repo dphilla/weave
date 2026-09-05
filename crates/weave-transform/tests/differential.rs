@@ -18,26 +18,38 @@ struct HostState {
 fn build_linker(engine: &Engine, with_poll: bool) -> Linker<HostState> {
     let mut linker: Linker<HostState> = Linker::new(engine);
     linker
-        .func_wrap("env", "emit", |mut caller: Caller<'_, HostState>, v: i32| {
-            caller.data_mut().emitted.push(v as i64);
-        })
+        .func_wrap(
+            "env",
+            "emit",
+            |mut caller: Caller<'_, HostState>, v: i32| {
+                caller.data_mut().emitted.push(v as i64);
+            },
+        )
         .unwrap();
     linker
-        .func_wrap("env", "emit64", |mut caller: Caller<'_, HostState>, v: i64| {
-            caller.data_mut().emitted.push(v);
-        })
+        .func_wrap(
+            "env",
+            "emit64",
+            |mut caller: Caller<'_, HostState>, v: i64| {
+                caller.data_mut().emitted.push(v);
+            },
+        )
         .unwrap();
     if with_poll {
         linker
-            .func_wrap("weave", "poll", |mut caller: Caller<'_, HostState>| -> i32 {
-                let st = caller.data_mut();
-                let n = st.polls;
-                st.polls += 1;
-                match st.unwind_at {
-                    Some(k) if n >= k => 1,
-                    _ => 0,
-                }
-            })
+            .func_wrap(
+                "weave",
+                "poll",
+                |mut caller: Caller<'_, HostState>| -> i32 {
+                    let st = caller.data_mut();
+                    let n = st.polls;
+                    st.polls += 1;
+                    match st.unwind_at {
+                        Some(k) if n >= k => 1,
+                        _ => 0,
+                    }
+                },
+            )
             .unwrap();
     }
     linker
@@ -53,7 +65,14 @@ fn run_module(
 ) -> Result<(Vec<Val>, Vec<i64>)> {
     let module = Module::new(engine, wasm)?;
     let linker = build_linker(engine, with_poll);
-    let mut store = Store::new(engine, HostState { emitted: vec![], polls: 0, unwind_at: None });
+    let mut store = Store::new(
+        engine,
+        HostState {
+            emitted: vec![],
+            polls: 0,
+            unwind_at: None,
+        },
+    );
     let instance = linker.instantiate(&mut store, &module)?;
     if with_poll {
         let init = instance.get_func(&mut store, names::F_INIT).unwrap();
@@ -327,7 +346,11 @@ fn checkpoint_restore_case(wat_src: &str, entry: &str, args: &[Val], unwind_at: 
     let linker = build_linker(&engine, true);
     let mut store = Store::new(
         &engine,
-        HostState { emitted: vec![], polls: 0, unwind_at: Some(unwind_at) },
+        HostState {
+            emitted: vec![],
+            polls: 0,
+            unwind_at: Some(unwind_at),
+        },
     );
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let init = instance.get_func(&mut store, names::F_INIT).unwrap();
@@ -358,16 +381,25 @@ fn checkpoint_restore_case(wat_src: &str, entry: &str, args: &[Val], unwind_at: 
     let linker2 = build_linker(&engine, true);
     let mut store2 = Store::new(
         &engine,
-        HostState { emitted: emitted_before.clone(), polls: 0, unwind_at: None },
+        HostState {
+            emitted: emitted_before.clone(),
+            polls: 0,
+            unwind_at: None,
+        },
     );
     let instance2 = linker2.instantiate(&mut store2, &module).unwrap();
     // NOTE: __weave_init is NOT called on restore.
-    let mem2 = instance2.get_memory(&mut store2, &meta.memories[0]).unwrap();
+    let mem2 = instance2
+        .get_memory(&mut store2, &meta.memories[0])
+        .unwrap();
     let need = mem_bytes.len();
     let have = mem2.data_size(&store2);
     if need > have {
-        mem2.grow(&mut store2, ((need - have) / weave_core::WASM_PAGE_SIZE) as u64)
-            .unwrap();
+        mem2.grow(
+            &mut store2,
+            ((need - have) / weave_core::WASM_PAGE_SIZE) as u64,
+        )
+        .unwrap();
     }
     mem2.data_mut(&mut store2)[..need].copy_from_slice(&mem_bytes);
     for (name, v) in &globals {
@@ -391,9 +423,9 @@ fn checkpoint_restore_case(wat_src: &str, entry: &str, args: &[Val], unwind_at: 
         weave_core::ValType::I64 => {
             Val::I64(i64::from_le_bytes(data[roff..roff + 8].try_into().unwrap()))
         }
-        weave_core::ValType::F64 => Val::F64(u64::from_le_bytes(
-            data[roff..roff + 8].try_into().unwrap(),
-        )),
+        weave_core::ValType::F64 => {
+            Val::F64(u64::from_le_bytes(data[roff..roff + 8].try_into().unwrap()))
+        }
         _ => unreachable!(),
     };
     let fmt = |v: &Val| format!("{v:?}");
@@ -423,7 +455,11 @@ fn checkpoint_restore_case(wat_src: &str, entry: &str, args: &[Val], unwind_at: 
 }
 
 fn get_global(store: &mut Store<HostState>, instance: &Instance, name: &str) -> i32 {
-    match instance.get_global(&mut *store, name).unwrap().get(&mut *store) {
+    match instance
+        .get_global(&mut *store, name)
+        .unwrap()
+        .get(&mut *store)
+    {
         Val::I32(v) => v,
         other => panic!("global {name} is not i32: {other:?}"),
     }
@@ -463,4 +499,3 @@ fn preserves_untouched_functions() {
     differential(wat_src, "run", &[Val::I32(1000)], 1);
     let _ = Extern::Func; // silence unused-import lint pattern
 }
-

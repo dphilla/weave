@@ -12,9 +12,7 @@ use crate::emit::Plan;
 use crate::module::ParsedModule;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
-use wasmparser::{
-    BlockType, FuncValidator, FunctionBody, Operator, ValType, ValidatorResources,
-};
+use wasmparser::{BlockType, FuncValidator, FunctionBody, Operator, ValType, ValidatorResources};
 
 /// Normalized slot type. All reference types are funcref (enforced upstream).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -68,28 +66,76 @@ pub struct Slot {
 #[derive(Debug)]
 pub enum Ins<'a> {
     /// Pass-through operator: read `ins` from slot locals, run op, write `outs`.
-    Op { op: Operator<'a>, ins: Vec<Slot>, outs: Vec<Slot> },
+    Op {
+        op: Operator<'a>,
+        ins: Vec<Slot>,
+        outs: Vec<Slot>,
+    },
     /// Slot-to-slot move (branch argument shuffling).
-    Copy { from: Slot, to: Slot },
+    Copy {
+        from: Slot,
+        to: Slot,
+    },
     /// Set the i32 shadow companion of a funcref slot.
-    ShadowConst { slot: Slot, val: i32 },
-    ShadowFromLocal { orig_local: u32, slot: Slot },
-    ShadowToLocal { slot: Slot, orig_local: u32 },
-    ShadowFromGlobal { shadow_global: u32, slot: Slot },
-    ShadowToGlobal { slot: Slot, shadow_global: u32 },
-    ShadowSelect { cond: Slot, on_true: Slot, on_false: Slot, out: Slot },
+    ShadowConst {
+        slot: Slot,
+        val: i32,
+    },
+    ShadowFromLocal {
+        orig_local: u32,
+        slot: Slot,
+    },
+    ShadowToLocal {
+        slot: Slot,
+        orig_local: u32,
+    },
+    ShadowFromGlobal {
+        shadow_global: u32,
+        slot: Slot,
+    },
+    ShadowToGlobal {
+        slot: Slot,
+        shadow_global: u32,
+    },
+    ShadowSelect {
+        cond: Slot,
+        on_true: Slot,
+        on_false: Slot,
+        out: Slot,
+    },
     /// Read `tshadow[t][idx]` into `out`'s shadow (after the real table.get).
-    ShadowTableGet { table: u32, idx: Slot, out: Slot },
+    ShadowTableGet {
+        table: u32,
+        idx: Slot,
+        out: Slot,
+    },
     /// Write `val`'s shadow into `tshadow[t][idx]` (after the real table.set).
-    ShadowTableSet { table: u32, idx: Slot, val: Slot },
+    ShadowTableSet {
+        table: u32,
+        idx: Slot,
+        val: Slot,
+    },
     /// Mark a passive segment dropped (weave keeps the real segment alive so a
     /// restored instance on a fresh instantiation still has it; init ops are
     /// gated on this flag instead).
-    SegDropFlag { flag_off: u32 },
+    SegDropFlag {
+        flag_off: u32,
+    },
     /// `memory.init` with dropped-segment gating that reproduces trap semantics.
-    GatedMemInit { data: u32, flag_off: u32, dst: Slot, src: Slot, len: Slot, mem: u32 },
+    GatedMemInit {
+        data: u32,
+        flag_off: u32,
+        dst: Slot,
+        src: Slot,
+        len: Slot,
+        mem: u32,
+    },
     /// Call to a generated table helper.
-    HelperCall { helper: u32, args: Vec<HelperArg>, out: Option<Slot> },
+    HelperCall {
+        helper: u32,
+        args: Vec<HelperArg>,
+        out: Option<Slot>,
+    },
 }
 
 #[derive(Debug)]
@@ -109,15 +155,29 @@ pub enum Site<'a> {
     Poll,
     /// Call that can transitively unwind; followed by an unwind check + spill.
     /// Resume re-executes this call (args are re-read from their slots).
-    Call { op: Operator<'a>, ins: Vec<Slot>, outs: Vec<Slot> },
+    Call {
+        op: Operator<'a>,
+        ins: Vec<Slot>,
+        outs: Vec<Slot>,
+    },
 }
 
 #[derive(Debug)]
 pub enum Term {
     Goto(usize),
-    CondGoto { cond: Slot, t: usize, f: usize },
-    TableGoto { index: Slot, targets: Vec<usize>, default: usize },
-    Return { vals: Vec<Slot> },
+    CondGoto {
+        cond: Slot,
+        t: usize,
+        f: usize,
+    },
+    TableGoto {
+        index: Slot,
+        targets: Vec<usize>,
+        default: usize,
+    },
+    Return {
+        vals: Vec<Slot>,
+    },
     Trap,
 }
 
@@ -128,9 +188,13 @@ pub struct FlatBlock<'a> {
     pub term: Term,
 }
 
-impl<'a> FlatBlock<'a> {
+impl FlatBlock<'_> {
     fn new() -> Self {
-        FlatBlock { site: None, insts: Vec::new(), term: Term::Trap }
+        FlatBlock {
+            site: None,
+            insts: Vec::new(),
+            term: Term::Trap,
+        }
     }
 }
 
@@ -380,7 +444,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
         let mut v = Vec::with_capacity(n);
         for i in 0..n {
             let key = self.operand_key(n - 1 - i)?;
-            v.push(Slot { depth: h - n as u32 + i as u32, key });
+            v.push(Slot {
+                depth: h - n as u32 + i as u32,
+                key,
+            });
         }
         Ok(v)
     }
@@ -430,8 +497,14 @@ impl<'a, 'p> Flattener<'a, 'p> {
         let n = tys.len() as u32;
         let mut copies = Vec::new();
         for (i, ty) in tys.iter().enumerate() {
-            let src = Slot { depth: from_top - n + i as u32, key: *ty };
-            let dst = Slot { depth: target_base + i as u32, key: *ty };
+            let src = Slot {
+                depth: from_top - n + i as u32,
+                key: *ty,
+            };
+            let dst = Slot {
+                depth: target_base + i as u32,
+                key: *ty,
+            };
             if src.depth != dst.depth {
                 copies.push((src, dst));
             }
@@ -497,8 +570,15 @@ impl<'a, 'p> Flattener<'a, 'p> {
                     let else_l = self.reserve();
                     frame.else_label = Some(else_l);
                     if live {
-                        let cond = Slot { depth: h - 1, key: SlotKey::I32 };
-                        self.set_term(Term::CondGoto { cond, t: then_l, f: else_l });
+                        let cond = Slot {
+                            depth: h - 1,
+                            key: SlotKey::I32,
+                        };
+                        self.set_term(Term::CondGoto {
+                            cond,
+                            t: then_l,
+                            f: else_l,
+                        });
                         self.open(then_l);
                     }
                     // Default: an if with no else is a pass-through.
@@ -549,7 +629,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
                         .results
                         .iter()
                         .enumerate()
-                        .map(|(i, ty)| Slot { depth: f.base + i as u32, key: *ty })
+                        .map(|(i, ty)| Slot {
+                            depth: f.base + i as u32,
+                            key: *ty,
+                        })
                         .collect();
                     debug_assert_eq!(f.base, 0);
                     let _ = n;
@@ -572,11 +655,18 @@ impl<'a, 'p> Flattener<'a, 'p> {
             Operator::BrIf { relative_depth } => {
                 if live {
                     let h = self.height();
-                    let cond = Slot { depth: h - 1, key: SlotKey::I32 };
+                    let cond = Slot {
+                        depth: h - 1,
+                        key: SlotKey::I32,
+                    };
                     // Branch args sit under the condition.
                     let label = self.branch_label(relative_depth, h - 1);
                     let fall = self.reserve();
-                    self.set_term(Term::CondGoto { cond, t: label, f: fall });
+                    self.set_term(Term::CondGoto {
+                        cond,
+                        t: label,
+                        f: fall,
+                    });
                     self.open(fall);
                 }
                 self.validate(ops, pos)?;
@@ -585,13 +675,20 @@ impl<'a, 'p> Flattener<'a, 'p> {
             Operator::BrTable { ref targets } => {
                 if live {
                     let h = self.height();
-                    let index = Slot { depth: h - 1, key: SlotKey::I32 };
+                    let index = Slot {
+                        depth: h - 1,
+                        key: SlotKey::I32,
+                    };
                     let mut labels = Vec::new();
                     for t in targets.targets() {
                         labels.push(self.branch_label(t?, h - 1));
                     }
                     let default = self.branch_label(targets.default(), h - 1);
-                    self.set_term(Term::TableGoto { index, targets: labels, default });
+                    self.set_term(Term::TableGoto {
+                        index,
+                        targets: labels,
+                        default,
+                    });
                 }
                 self.validate(ops, pos)?;
                 self.apply_liveness();
@@ -612,8 +709,7 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 self.validate(ops, pos)?;
                 self.apply_liveness();
             }
-            Operator::Call { function_index }
-            | Operator::ReturnCall { function_index } => {
+            Operator::Call { function_index } | Operator::ReturnCall { function_index } => {
                 let tail = matches!(op, Operator::ReturnCall { .. });
                 if live {
                     let sig = self.pm.func_sig(function_index);
@@ -624,7 +720,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
                         .results
                         .iter()
                         .enumerate()
-                        .map(|(i, t)| Slot { depth: h - n as u32 + i as u32, key: SlotKey::of(*t) })
+                        .map(|(i, t)| Slot {
+                            depth: h - n as u32 + i as u32,
+                            key: SlotKey::of(*t),
+                        })
                         .collect();
                     self.lower_call(
                         Operator::Call { function_index },
@@ -638,8 +737,14 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 self.validate(ops, pos)?;
                 self.apply_liveness();
             }
-            Operator::CallIndirect { type_index, table_index }
-            | Operator::ReturnCallIndirect { type_index, table_index } => {
+            Operator::CallIndirect {
+                type_index,
+                table_index,
+            }
+            | Operator::ReturnCallIndirect {
+                type_index,
+                table_index,
+            } => {
                 let tail = matches!(op, Operator::ReturnCallIndirect { .. });
                 if live {
                     let sig = &self.pm.types[type_index as usize];
@@ -658,7 +763,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
                         })
                         .collect();
                     self.lower_call(
-                        Operator::CallIndirect { type_index, table_index },
+                        Operator::CallIndirect {
+                            type_index,
+                            table_index,
+                        },
                         u32::MAX,
                         true,
                         ins,
@@ -674,8 +782,15 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 if live {
                     self.validate(ops, pos)?;
                     let h = self.height();
-                    let out = Slot { depth: h - 1, key: SlotKey::FuncRef };
-                    self.push_ins(Ins::Op { op, ins: vec![], outs: vec![out] });
+                    let out = Slot {
+                        depth: h - 1,
+                        key: SlotKey::FuncRef,
+                    };
+                    self.push_ins(Ins::Op {
+                        op,
+                        ins: vec![],
+                        outs: vec![out],
+                    });
                     self.push_ins(Ins::ShadowConst { slot: out, val: -1 });
                 } else {
                     self.validate(ops, pos)?;
@@ -686,10 +801,20 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 if live {
                     self.validate(ops, pos)?;
                     let h = self.height();
-                    let out = Slot { depth: h - 1, key: SlotKey::FuncRef };
+                    let out = Slot {
+                        depth: h - 1,
+                        key: SlotKey::FuncRef,
+                    };
                     let new_idx = self.plan.map_func(function_index) as i32;
-                    self.push_ins(Ins::Op { op, ins: vec![], outs: vec![out] });
-                    self.push_ins(Ins::ShadowConst { slot: out, val: new_idx });
+                    self.push_ins(Ins::Op {
+                        op,
+                        ins: vec![],
+                        outs: vec![out],
+                    });
+                    self.push_ins(Ins::ShadowConst {
+                        slot: out,
+                        val: new_idx,
+                    });
                 } else {
                     self.validate(ops, pos)?;
                 }
@@ -700,8 +825,15 @@ impl<'a, 'p> Flattener<'a, 'p> {
                     let ins = self.top_slots(1)?;
                     let idx = ins[0];
                     self.validate(ops, pos)?;
-                    let out = Slot { depth: idx.depth, key: SlotKey::FuncRef };
-                    self.push_ins(Ins::Op { op, ins: vec![idx], outs: vec![out] });
+                    let out = Slot {
+                        depth: idx.depth,
+                        key: SlotKey::FuncRef,
+                    };
+                    self.push_ins(Ins::Op {
+                        op,
+                        ins: vec![idx],
+                        outs: vec![out],
+                    });
                     self.push_ins(Ins::ShadowTableGet { table, idx, out });
                 } else {
                     self.validate(ops, pos)?;
@@ -713,7 +845,11 @@ impl<'a, 'p> Flattener<'a, 'p> {
                     let ins = self.top_slots(2)?;
                     let (idx, val) = (ins[0], ins[1]);
                     self.validate(ops, pos)?;
-                    self.push_ins(Ins::Op { op, ins: vec![idx, val], outs: vec![] });
+                    self.push_ins(Ins::Op {
+                        op,
+                        ins: vec![idx, val],
+                        outs: vec![],
+                    });
                     self.push_ins(Ins::ShadowTableSet { table, idx, val });
                 } else {
                     self.validate(ops, pos)?;
@@ -726,11 +862,18 @@ impl<'a, 'p> Flattener<'a, 'p> {
                     let (val, n) = (ins[0], ins[1]);
                     self.validate(ops, pos)?;
                     let h = self.height();
-                    let out = Slot { depth: h - 1, key: SlotKey::I32 };
+                    let out = Slot {
+                        depth: h - 1,
+                        key: SlotKey::I32,
+                    };
                     let helper = self.plan.tgrow[&table];
                     self.push_ins(Ins::HelperCall {
                         helper,
-                        args: vec![HelperArg::Ref(val), HelperArg::Shadow(val), HelperArg::Val(n)],
+                        args: vec![
+                            HelperArg::Ref(val),
+                            HelperArg::Shadow(val),
+                            HelperArg::Val(n),
+                        ],
                         out: Some(out),
                     });
                 } else {
@@ -759,7 +902,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 }
                 self.apply_liveness();
             }
-            Operator::TableCopy { dst_table, src_table } => {
+            Operator::TableCopy {
+                dst_table,
+                src_table,
+            } => {
                 if live {
                     let ins = self.top_slots(3)?;
                     self.validate(ops, pos)?;
@@ -832,9 +978,15 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 self.generic(ops, pos, op, live)?;
                 if live && self.locals.orig_types[local_index as usize] == SlotKey::FuncRef {
                     let h = self.height();
-                    let out = Slot { depth: h - 1, key: SlotKey::FuncRef };
+                    let out = Slot {
+                        depth: h - 1,
+                        key: SlotKey::FuncRef,
+                    };
                     let sh = self.locals.orig_shadow_local(local_index);
-                    self.push_ins(Ins::ShadowFromLocal { orig_local: sh, slot: out });
+                    self.push_ins(Ins::ShadowFromLocal {
+                        orig_local: sh,
+                        slot: out,
+                    });
                 }
                 self.apply_liveness();
                 return Ok(());
@@ -849,7 +1001,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 };
                 self.generic(ops, pos, op, live)?;
                 if let (Some(s), Some(sh)) = (src, sh) {
-                    self.push_ins(Ins::ShadowToLocal { slot: s, orig_local: sh });
+                    self.push_ins(Ins::ShadowToLocal {
+                        slot: s,
+                        orig_local: sh,
+                    });
                 }
                 self.apply_liveness();
                 return Ok(());
@@ -859,8 +1014,14 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 if live {
                     if let Some(&shg) = self.plan.shadow_globals.get(&global_index) {
                         let h = self.height();
-                        let out = Slot { depth: h - 1, key: SlotKey::FuncRef };
-                        self.push_ins(Ins::ShadowFromGlobal { shadow_global: shg, slot: out });
+                        let out = Slot {
+                            depth: h - 1,
+                            key: SlotKey::FuncRef,
+                        };
+                        self.push_ins(Ins::ShadowFromGlobal {
+                            shadow_global: shg,
+                            slot: out,
+                        });
                     }
                 }
                 self.apply_liveness();
@@ -878,7 +1039,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
                 };
                 self.generic(ops, pos, op, live)?;
                 if let Some((s, shg)) = pre {
-                    self.push_ins(Ins::ShadowToGlobal { slot: s, shadow_global: shg });
+                    self.push_ins(Ins::ShadowToGlobal {
+                        slot: s,
+                        shadow_global: shg,
+                    });
                 }
                 self.apply_liveness();
                 return Ok(());
@@ -888,10 +1052,22 @@ impl<'a, 'p> Flattener<'a, 'p> {
                     let ins = self.top_slots(3)?;
                     let (a, b, cond) = (ins[0], ins[1], ins[2]);
                     self.validate(ops, pos)?;
-                    let out = Slot { depth: a.depth, key: a.key };
-                    self.push_ins(Ins::Op { op, ins: vec![a, b, cond], outs: vec![out] });
+                    let out = Slot {
+                        depth: a.depth,
+                        key: a.key,
+                    };
+                    self.push_ins(Ins::Op {
+                        op,
+                        ins: vec![a, b, cond],
+                        outs: vec![out],
+                    });
                     if a.key == SlotKey::FuncRef {
-                        self.push_ins(Ins::ShadowSelect { cond, on_true: a, on_false: b, out });
+                        self.push_ins(Ins::ShadowSelect {
+                            cond,
+                            on_true: a,
+                            on_false: b,
+                            out,
+                        });
                     }
                 } else {
                     self.validate(ops, pos)?;
@@ -930,7 +1106,10 @@ impl<'a, 'p> Flattener<'a, 'p> {
         let mut outs = Vec::with_capacity(pushes as usize);
         for i in 0..pushes {
             let key = self.operand_key((pushes - 1 - i) as usize)?;
-            outs.push(Slot { depth: base + i, key });
+            outs.push(Slot {
+                depth: base + i,
+                key,
+            });
         }
         self.push_ins(Ins::Op { op, ins, outs });
         Ok(())
@@ -955,9 +1134,17 @@ impl<'a, 'p> Flattener<'a, 'p> {
         };
         if can_unwind && self.instrumented {
             let site_block = self.split();
-            self.blocks[site_block].site = Some(Site::Call { op, ins, outs: outs.clone() });
+            self.blocks[site_block].site = Some(Site::Call {
+                op,
+                ins,
+                outs: outs.clone(),
+            });
         } else {
-            self.push_ins(Ins::Op { op, ins, outs: outs.clone() });
+            self.push_ins(Ins::Op {
+                op,
+                ins,
+                outs: outs.clone(),
+            });
         }
         if tail {
             // `return_call` is lowered to call+return: identical semantics,

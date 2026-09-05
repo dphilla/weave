@@ -4,8 +4,9 @@
 
 use anyhow::{bail, Context, Result};
 use wasmparser::{
-    CompositeInnerType, Data, Element, ExternalKind, FunctionBody, Global, Parser, Payload,
-    RecGroup, Table, TypeRef, ValType,
+    CompositeInnerType, Data, DataKind, Element, ElementItems, ElementKind, ExternalKind,
+    FunctionBody, Global, OperatorsReader, Parser, Payload, RecGroup, Table, TableInit, TypeRef,
+    ValType,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,7 +56,7 @@ pub struct ParsedModule<'a> {
     pub code: Vec<FunctionBody<'a>>,
 }
 
-impl<'a> ParsedModule<'a> {
+impl ParsedModule<'_> {
     /// Signature of a function by (old) function index, imports included.
     pub fn func_sig(&self, func: u32) -> &FuncSig {
         let ti = if (func as usize) < self.imported_funcs.len() {
@@ -92,6 +93,13 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
         datas: Vec::new(),
         code: Vec::new(),
     };
+
+    // Recognize unsupported proposals before validation: our parser can decode
+    // newer GC constant expressions which its validator does not yet accept.
+    // This is a rejection-only preflight, never a replacement for validation.
+    if let Some(feature) = unsupported_feature(wasm).context("input module failed validation")? {
+        bail!("unsupported: {feature}");
+    }
 
     // Validate up front so the instrumenter can assume a well-typed module.
     wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::default())
@@ -160,6 +168,11 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
                     m.memories.push(mem?);
                 }
             }
+            // Also reject here so a future preflight refactor cannot silently
+            // discard a tag section while retaining instructions that use it.
+            Payload::TagSection(r) if r.count() != 0 => {
+                bail!("unsupported: exception tags");
+            }
             Payload::GlobalSection(r) => {
                 for g in r {
                     let g = g?;
@@ -199,8 +212,10 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
             bail!("unsupported: memory64");
         }
         if mem.shared {
-            bail!("unsupported: shared (threaded) memories — concurrent mutation cannot be \
-                   consistently checkpointed without stop-the-world across threads");
+            bail!(
+                "unsupported: shared (threaded) memories — concurrent mutation cannot be \
+                   consistently checkpointed without stop-the-world across threads"
+            );
         }
     }
     if m.num_imported_memories > 0 && m.memories[0].maximum.is_some() {
@@ -218,6 +233,9 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
         }
     }
     for t in &m.tables {
+        if t.table64 {
+            bail!("unsupported: table64 (64-bit table indices)");
+        }
         let rt = t.element_type;
         if !rt.is_func_ref() {
             bail!(
@@ -252,6 +270,118 @@ pub fn parse(wasm: &[u8]) -> Result<ParsedModule<'_>> {
         // A module with no memory at all gets one added by the transformer.
     }
     Ok(m)
+}
+
+/// Inspect declarations and instructions without assuming a well-typed input.
+/// Keep reading after finding an unsupported feature so truncated encodings in
+/// these sections still report decoding errors, not an unsupported-feature
+/// diagnostic. Every input which passes this check is fully validated above.
+fn unsupported_feature(wasm: &[u8]) -> wasmparser::Result<Option<&'static str>> {
+    let mut feature = None;
+    for payload in Parser::new(0).parse_all(wasm) {
+        match payload? {
+            Payload::ImportSection(imports) => {
+                for import in imports {
+                    match import?.ty {
+                        TypeRef::Table(table) if table.table64 => {
+                            feature.get_or_insert("table64 (64-bit table indices)");
+                        }
+                        TypeRef::Tag(_) => {
+                            feature.get_or_insert("exception tags");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Payload::TableSection(tables) => {
+                for table in tables {
+                    let table = table?;
+                    if table.ty.table64 {
+                        feature.get_or_insert("table64 (64-bit table indices)");
+                    }
+                    if let TableInit::Expr(expr) = table.init {
+                        scan_unsupported_operators(expr.get_operators_reader(), &mut feature)?;
+                    }
+                }
+            }
+            Payload::TagSection(tags) => {
+                for tag in tags {
+                    tag?;
+                    feature.get_or_insert("exception tags");
+                }
+            }
+            Payload::GlobalSection(globals) => {
+                for global in globals {
+                    scan_unsupported_operators(
+                        global?.init_expr.get_operators_reader(),
+                        &mut feature,
+                    )?;
+                }
+            }
+            Payload::ElementSection(elements) => {
+                for element in elements {
+                    let element = element?;
+                    if let ElementKind::Active { offset_expr, .. } = element.kind {
+                        scan_unsupported_operators(
+                            offset_expr.get_operators_reader(),
+                            &mut feature,
+                        )?;
+                    }
+                    if let ElementItems::Expressions(_, expressions) = element.items {
+                        for expr in expressions {
+                            scan_unsupported_operators(expr?.get_operators_reader(), &mut feature)?;
+                        }
+                    }
+                }
+            }
+            Payload::DataSection(segments) => {
+                for segment in segments {
+                    if let DataKind::Active { offset_expr, .. } = segment?.kind {
+                        scan_unsupported_operators(
+                            offset_expr.get_operators_reader(),
+                            &mut feature,
+                        )?;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                scan_unsupported_operators(body.get_operators_reader()?, &mut feature)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(feature)
+}
+
+fn scan_unsupported_operators(
+    mut operators: OperatorsReader<'_>,
+    feature: &mut Option<&'static str>,
+) -> wasmparser::Result<()> {
+    while !operators.eof() {
+        let op = operators.read()?;
+        if let Some(found) = unsupported_operator(&op) {
+            feature.get_or_insert(found);
+        }
+    }
+    Ok(())
+}
+
+fn unsupported_operator(op: &wasmparser::Operator<'_>) -> Option<&'static str> {
+    macro_rules! classify {
+        ($( @$proposal:ident $operator:ident $({ $($arg:ident: $ty:ty),* })?
+            => $visit:ident ($($annotation:tt)*))*) => {
+            match op {
+                $(wasmparser::Operator::$operator $({ $($arg: _),* })? =>
+                    match stringify!($proposal) {
+                        "exceptions" | "legacy_exceptions" => Some("exception instructions"),
+                        "gc" => Some("GC instructions"),
+                        _ => None,
+                    },)*
+                _ => None,
+            }
+        };
+    }
+    wasmparser::for_each_operator!(classify)
 }
 
 fn is_atomic(op: &wasmparser::Operator<'_>) -> bool {

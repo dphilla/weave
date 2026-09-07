@@ -200,6 +200,7 @@ remove_validated() {
 is_allowlisted_temp_name() {
   case "$1" in
     weave-conformance.?* | \
+    weave-control-interface.?* | weave-control-interface-?* | \
     weave-browser-peer.?* | \
     weave-browser-peer-?* | \
     weave-browser-sidecar.?* | \

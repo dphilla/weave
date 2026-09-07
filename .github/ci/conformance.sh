@@ -499,7 +499,10 @@ run_route() {
     }
 
     control_file="$case_dir/control-$i-${current}-to-${next}"
-    "$WEAVE_BIN" migrate --node "${addresses[$i]}" --to "${addresses[$((i + 1))]}" \
+    # These nodes deliberately exit on completion; use the synchronous legacy
+    # reply. Recoverable structured operation polling is qualified separately
+    # against persistent nodes by control-interface.mjs.
+    "$WEAVE_BIN" migrate --legacy --node "${addresses[$i]}" --to "${addresses[$((i + 1))]}" \
       >"$control_file.stdout" 2>"$control_file.stderr" &
     control_pid=$!
     active_pids+=("$control_pid")

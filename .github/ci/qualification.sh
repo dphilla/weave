@@ -26,6 +26,9 @@ unset WEAVE_CI_ARTIFACT_DIR
 .github/ci/run-wamr.sh
 .github/ci/check-workflows.sh
 
+WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/control" \
+  bash .github/ci/control-interface.sh
+
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/checkpoint" \
   .github/ci/checkpoint-file.sh
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/rust-guest" \

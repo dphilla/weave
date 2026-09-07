@@ -31,6 +31,7 @@ Cargo behavior unless the caller sets that variable too.
 | `wait-for.sh` | Suspend-safe process, output, and event condition waits |
 | `wait-for.test.sh` | Isolated condition success and active-time timeout checks |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
+| `control-interface.sh` | Structured CLI/adversarial-peer checks and persistent four-runtime operation-recovery cycle |
 | `semantic-conformance.sh` | Fixed expected guest traces for initialization, memory, tail calls, and SIMD before/after migration |
 | `checkpoint-file.sh` | Checkpoint-file → fresh-process restore golden check |
 | `rust-guest.sh` | Out-of-tree Rust/LLVM guest build and Wasmtime→Node migration |
@@ -62,6 +63,10 @@ From the repository root:
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
+
+# Human/agent CLI control against all four native adapters and faulty peers.
+WEAVE_CI_ARTIFACT_DIR=/tmp/weave-control-check \
+  bash .github/ci/control-interface.sh
 
 # Exercise only the publishable package boundary from a clean consumer.
 .github/ci/package-smoke.sh

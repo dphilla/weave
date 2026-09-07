@@ -205,6 +205,8 @@ fn actual_commit_pending_and_lost_ack_remain_retired() -> Result<()> {
             }
         };
         let target = TcpStream::connect(target_address)?;
+        // Darwin may inherit the listener's nonblocking flag on accepted sockets.
+        source.set_nonblocking(false)?;
         deadlines(&source)?;
         deadlines(&target)?;
         let mut from_source = source.try_clone()?;

@@ -88,6 +88,31 @@ A WAMR node can be either endpoint in a chain. A browser endpoint carries the
 same frame bytes over its WebSocket transport; a WebSocket-to-TCP bridge is
 still needed when the browser and this raw-TCP node communicate directly.
 
+### Structured control for applications and agents
+
+The same `serve` listener also implements the versioned
+[structured control contract](../docs/CONTROL.md). Frames 23/24 carry bounded
+JSON requests/responses; legacy `weave-wamr status` and `migrate` commands and
+their frame types remain supported. A status request discovers the node's
+process epoch, lifecycle, source execution authority, exact built-in import
+signatures and service names, and configured receive limits. Advertised
+`adapter_version` identifies this adapter, not the embedded WAMR version.
+
+Structured migration requires that epoch and a caller-selected operation ID.
+The node reserves an accepted request before replying immediately; query the
+same ID for completion. Replaying that ID and target never starts another
+migration within the same epoch, even after failure or a later incoming
+workload. The process retains 256 accepted IDs without eviction, then rejects
+new operations. Restarting loses that history and changes the epoch.
+
+Both confirmed and unconfirmed COMMIT outcomes report source ownership as
+`retired`; status also reflects retirement while confirmation is pending.
+Only a failure before handoff leaves source authority `retained`. These facts
+come from runtime events and the protocol retirement latch, not log text.
+Control timeouts or disconnected clients do not cancel accepted work, and
+legacy requests do not gain replay protection. Raw control is unauthenticated:
+keep listeners on trusted networks or behind an authorized tunnel.
+
 ## Current workload boundary
 
 This supports arbitrary workloads that the current transformer accepts **and**
@@ -119,3 +144,8 @@ cross-memory copy/fill/init. Adapter tests checkpoint it mid-loop, restore into
 a new instance, and check its result. Separate cases verify indexed SIMD and
 bulk accesses still trap at the memory boundary, and that constructor exports
 remain dormant during fresh and incoming instantiation.
+
+`tests/structured_control.rs` drives actual child-process WAMR nodes with a
+transformed looping guest. It checks failed-attempt replay, a confirmed native
+handoff, process epoch changes, and a loopback proxy that pauses COMMIT then
+drops COMMIT_OK. All nodes are terminated and reaped by the test harness.

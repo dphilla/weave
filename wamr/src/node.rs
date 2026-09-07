@@ -319,7 +319,7 @@ fn control_capabilities(max_memory_bytes: u64) -> Capabilities {
         })
         .collect(),
     );
-    capabilities.features = ["bulk-memory", "reference-types", "simd", "multi-memory"]
+    capabilities.features = ["bulk_memory", "reference_types", "simd", "multi_memory"]
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -565,7 +565,7 @@ mod tests {
             capabilities.limits.module_bytes,
             Some(weave_host::target::MAX_MODULE_SIZE)
         );
-        assert!(capabilities.features.contains(&"multi-memory".to_owned()));
+        assert!(capabilities.features.contains(&"multi_memory".to_owned()));
         assert!(!capabilities.features.contains(&"threads".to_owned()));
     }
 

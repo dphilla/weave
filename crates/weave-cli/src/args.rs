@@ -120,6 +120,21 @@ impl Args {
         if cmd == "serve" && (args.has("module") != args.has("invoke")) {
             bail!("--module and --invoke must be supplied together");
         }
+        if cmd == "serve"
+            && !args.has("module")
+            && ["pre-woven", "period", "stack-pages"]
+                .iter()
+                .any(|name| args.has(name))
+        {
+            bail!("module/transform options require --module on serve");
+        }
+        for name in ["node", "to"] {
+            if let Some(address) = args.flag(name) {
+                if !weave_core::control::valid_target(address) {
+                    bail!("--{name} must be host:port or [IPv6]:port with port 1..65535");
+                }
+            }
+        }
         if args.has("pre-woven") && (args.has("period") || args.has("stack-pages")) {
             bail!("transform options cannot be used with --pre-woven");
         }

@@ -68,6 +68,7 @@ impl Shared {
     }
 
     pub(crate) fn complete_request(&mut self, completion: Completion, result: String) {
+        self.refresh_ownership();
         self.control.complete(completion, &result);
         self.last_result = Some(result.clone());
         if let Some(request) = self.request.take() {
@@ -177,12 +178,32 @@ pub fn serve_with_capabilities(
 ) -> Result<()> {
     let listener =
         TcpListener::bind(&config.listen).with_context(|| format!("binding {}", config.listen))?;
-    eprintln!("weave: listening on {}", listener.local_addr()?);
     let shared = Arc::new(Mutex::new(Shared::with_capabilities(
         initial.is_some(),
         capabilities,
     )?));
     let (tx, rx) = mpsc::channel::<NodeEvent>();
+
+    // Initialization can trap or fail linking. Do it while the listener is
+    // still owned locally so an error closes it and returns normally, without
+    // leaving a detached control thread advertising a nonexistent workload.
+    let mut current: Option<(WeaveInstance, RunPhase)> = match initial {
+        Some(work) => {
+            let (services, any) = (factories.make_services)();
+            let link = (factories.make_link)();
+            let instance = WeaveInstance::new_fresh(engine, &work.module, services, any, link)
+                .context("instantiating initial workload")?;
+            Some((
+                instance,
+                RunPhase::Start {
+                    entry: work.entry,
+                    args: work.args,
+                },
+            ))
+        }
+        None => None,
+    };
+    eprintln!("weave: listening on {}", listener.local_addr()?);
 
     // Control / ingress listener thread. CTL frames are handled here; data
     // (migration) connections are handed to the main loop.
@@ -202,20 +223,6 @@ pub fn serve_with_capabilities(
     }
 
     // Main loop: run the current workload; when idle, wait for a migration.
-    let mut current: Option<(WeaveInstance, RunPhase)> = initial.map(|w| {
-        let (services, any) = (factories.make_services)();
-        let link = (factories.make_link)();
-        let inst = WeaveInstance::new_fresh(engine, &w.module, services, any, link)
-            .expect("instantiating initial workload");
-        (
-            inst,
-            RunPhase::Start {
-                entry: w.entry,
-                args: w.args,
-            },
-        )
-    });
-
     loop {
         match current.take() {
             None => {
@@ -558,6 +565,47 @@ mod tests {
             operation_id: Some(id.into()),
             target: Some("127.0.0.1:9000".into()),
         }
+    }
+
+    #[test]
+    fn trapped_initializer_returns_error_without_leaking_listener() {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
+        drop(reservation);
+        let engine = crate::default_engine().unwrap();
+        let raw = wat::parse_str(
+            r#"(module (func $start unreachable) (start $start) (func (export "run")))"#,
+        )
+        .unwrap();
+        let module =
+            WeaveModule::from_raw(&raw, &weave_transform::TransformOptions::default()).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            serve(
+                &engine,
+                NodeConfig {
+                    listen: address.to_string(),
+                    runtime_name: "test".into(),
+                    source_opts: SourceOptions::default(),
+                    exit_on_done: false,
+                },
+                NodeFactories {
+                    make_services: Box::new(|| (vec![], vec![])),
+                    make_link: Box::new(|| Box::new(|_| Ok(()))),
+                },
+                Some(InitialWork {
+                    module,
+                    entry: "run".into(),
+                    args: vec![],
+                }),
+            )
+        }));
+        let error = result
+            .expect("initialization errors must not panic")
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("instantiating initial workload"));
+        // An orphan control thread would retain this exact listener address.
+        let rebound = TcpListener::bind(address).expect("failed startup must release its listener");
+        drop(rebound);
     }
 
     #[test]

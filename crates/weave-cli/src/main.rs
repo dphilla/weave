@@ -68,12 +68,15 @@ fn main() {
         let (code, exit) = e
             .downcast_ref::<CliError>()
             .map(|e| (e.code, e.exit))
-            .unwrap_or(("COMMAND_FAILED", 4));
+            .unwrap_or(("COMMAND_FAILED", 1));
         if std::env::args().any(|a| a == "--json") {
             println!(
                 "{}",
                 serde_json::json!({"schema_version":1,"ok":false,"code":code,"message":format!("{e:#}"),"retry":"never"})
             );
+        } else if code == "COMMAND_FAILED" {
+            // Preserve legacy diagnostic prefixes consumed by corpus tooling.
+            eprintln!("weave: error: {e:#}");
         } else {
             eprintln!("weave: {code}: {e:#}");
         }
@@ -121,7 +124,8 @@ const USAGE: &str = "usage:
   weave status --node ADDR [--json]
   weave operation --node ADDR --operation-id ID --node-epoch EPOCH [--wait] [--json]
 Use weave COMMAND --help for options. JSON is supported by inspect/status/migrate/operation.
-Exit codes: 0 success/accepted; 2 usage; 3 incompatible/unknown preflight; 4 failure;
+Exit codes: 0 success/accepted; 1 legacy command failure; 2 usage;
+3 incompatible/unknown preflight; 4 control failure;
 5 commit or delivery uncertain; 6 wait expired (not proof of failure).";
 
 fn transform_opts(args: &Args) -> Result<TransformOptions> {

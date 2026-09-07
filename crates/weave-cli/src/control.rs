@@ -97,9 +97,95 @@ pub(crate) fn exchange(node: &str, request: &Request, deadline: Instant) -> Resu
     }
     .write_to(&mut conn)?;
     match read_reply(&mut conn)? {
-        Frame::CtlResponse { json } => Response::from_json(&json),
+        Frame::CtlResponse { json } => {
+            let response = Response::from_json(&json)?;
+            validate_response(request, &response)?;
+            Ok(response)
+        },
         _ => bail!("node does not support structured control; no legacy mutation was attempted (use --legacy explicitly if required)"),
     }
+}
+
+fn validate_response(request: &Request, response: &Response) -> Result<()> {
+    if response.node_epoch.len() != 32
+        || !response
+            .node_epoch
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        bail!("invalid node epoch in control response");
+    }
+    if request.action == Action::Status {
+        if response.ok && (response.code != "STATUS_OK" || response.capabilities.is_none()) {
+            bail!("invalid status response");
+        }
+        return Ok(());
+    }
+    if Some(response.node_epoch.as_str()) != request.node_epoch.as_deref()
+        && response.code != "NODE_EPOCH_MISMATCH"
+    {
+        bail!("control response node epoch does not match request");
+    }
+    if response.code == "NODE_EPOCH_MISMATCH" && (response.ok || response.operation.is_some()) {
+        bail!("invalid epoch mismatch response");
+    }
+    if let Some(operation) = &response.operation {
+        if Some(operation.operation_id.as_str()) != request.operation_id.as_deref() {
+            bail!("control response operation ID does not match request");
+        }
+        if request
+            .target
+            .as_ref()
+            .is_some_and(|target| target != &operation.target)
+        {
+            bail!("control response target does not match request");
+        }
+        if response.code != operation.code
+            || response.ok
+                != matches!(
+                    operation.state,
+                    OperationState::Accepted | OperationState::Succeeded
+                )
+        {
+            bail!("inconsistent control operation result");
+        }
+        let valid = match operation.state {
+            OperationState::Accepted => {
+                matches!(operation.code.as_str(), "ACCEPTED" | "COMMIT_PENDING")
+            }
+            OperationState::Succeeded => operation.code == "MIGRATED",
+            OperationState::Failed => matches!(
+                operation.code.as_str(),
+                "MIGRATION_FAILED" | "WORKLOAD_COMPLETED" | "WORKLOAD_TRAPPED"
+            ),
+            OperationState::Uncertain => operation.code == "COMMIT_UNCERTAIN",
+        };
+        if !valid {
+            bail!("unrecognized operation state/code combination");
+        }
+        if matches!(
+            operation.code.as_str(),
+            "COMMIT_PENDING" | "MIGRATED" | "COMMIT_UNCERTAIN"
+        ) && operation.ownership != weave_core::control::Ownership::Retired
+        {
+            bail!("handoff response does not retire source authority");
+        }
+        use weave_core::control::Ownership;
+        let expected = match operation.code.as_str() {
+            "ACCEPTED" => (Ownership::Retained, Retry::SameOperation),
+            "COMMIT_PENDING" | "COMMIT_UNCERTAIN" => (Ownership::Retired, Retry::InspectOwnership),
+            "MIGRATED" => (Ownership::Retired, Retry::Never),
+            "MIGRATION_FAILED" => (Ownership::Retained, Retry::NewOperation),
+            "WORKLOAD_COMPLETED" | "WORKLOAD_TRAPPED" => (Ownership::None, Retry::Never),
+            _ => unreachable!("validated operation code above"),
+        };
+        if (operation.ownership, operation.retry) != expected || response.retry != operation.retry {
+            bail!("control response gives inconsistent ownership or retry guidance");
+        }
+    } else if response.ok {
+        bail!("successful operation response omitted operation record");
+    }
+    Ok(())
 }
 pub(crate) fn status(node: &str, deadline: Instant) -> Result<Response> {
     exchange(node, &Request::status(), deadline)
@@ -116,8 +202,11 @@ fn render(response: &Response, json: bool) -> Result<()> {
             response.code
         );
         println!(
-            "epoch: {}  lifecycle: {:?}  source ownership: {:?}  retry: {:?}",
-            response.node_epoch, response.lifecycle, response.ownership, response.retry
+            "epoch: {}  lifecycle: {}  source ownership: {}  retry: {}",
+            response.node_epoch,
+            serde_json::to_value(response.lifecycle)?.as_str().unwrap(),
+            serde_json::to_value(response.ownership)?.as_str().unwrap(),
+            serde_json::to_value(response.retry)?.as_str().unwrap()
         );
         if let Some(op) = &response.operation {
             println!(
@@ -137,7 +226,8 @@ fn render(response: &Response, json: bool) -> Result<()> {
 fn response_exit(response: &Response) -> i32 {
     if response.code == "WAIT_TIMEOUT" {
         6
-    } else if response.code == "COMMIT_UNCERTAIN"
+    } else if response.code == "OBSERVATION_UNCERTAIN"
+        || response.code == "COMMIT_UNCERTAIN"
         || response.code == "DELIVERY_UNCERTAIN"
         || response.code == "NODE_EPOCH_MISMATCH"
     {
@@ -249,10 +339,37 @@ pub(crate) fn run(cmd: &str, args: &Args) -> Result<()> {
         );
     }
     let waiting = (cmd == "migrate" && !args.has("no-wait")) || args.has("wait");
+    let mut observed = false;
     loop {
-        match exchange(node, &request, deadline) {
+        let reply = exchange(node, &request, deadline).and_then(|response| {
+            if response
+                .operation
+                .as_ref()
+                .is_some_and(|op| args.flag("to").is_some_and(|target| target != op.target))
+            {
+                bail!("operation observation target does not match original migration target");
+            }
+            Ok(response)
+        });
+        match reply {
             Ok(response) => last = response,
             Err(error) => {
+                if observed {
+                    last.ok = false;
+                    last.code = if Instant::now() >= deadline {
+                        "WAIT_TIMEOUT"
+                    } else {
+                        "OBSERVATION_UNCERTAIN"
+                    }
+                    .into();
+                    last.message = format!("{error:#}; last observed operation is retained below, not a current status; query the same ID and epoch, never assume failure");
+                    last.retry = if last.ownership == weave_core::control::Ownership::Retired {
+                        Retry::InspectOwnership
+                    } else {
+                        Retry::SameOperation
+                    };
+                    return output(&last, args.has("json"));
+                }
                 // A write may have reached the source. Report identity even if
                 // the acknowledgement was lost; do not submit a fresh ID.
                 let value = serde_json::json!({"schema_version":1,"ok":false,"code":if cmd == "migrate" {"DELIVERY_UNCERTAIN"} else {"CONTROL_UNAVAILABLE"},"message":format!("{error:#}; query this operation ID and epoch; do not assume failure or restart the source"),"node_epoch":request.node_epoch,"operation_id":request.operation_id,"target":args.flag("to"),"ownership":"unknown","retry":"same_operation"});
@@ -268,6 +385,7 @@ pub(crate) fn run(cmd: &str, args: &Args) -> Result<()> {
             .operation
             .as_ref()
             .is_some_and(|op| op.state == OperationState::Accepted);
+        observed = last.operation.is_some();
         if !waiting || !last.ok || !pending {
             return output(&last, args.has("json"));
         }
@@ -276,7 +394,11 @@ pub(crate) fn run(cmd: &str, args: &Args) -> Result<()> {
             last.ok = false;
             last.code = "WAIT_TIMEOUT".into();
             last.message = "wait deadline reached; operation may still be running; query the same ID and epoch".into();
-            last.retry = Retry::SameOperation;
+            last.retry = if last.ownership == weave_core::control::Ownership::Retired {
+                Retry::InspectOwnership
+            } else {
+                Retry::SameOperation
+            };
             return output(&last, args.has("json"));
         }
         std::thread::sleep(Duration::from_millis(100));

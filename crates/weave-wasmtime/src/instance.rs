@@ -943,7 +943,52 @@ pub(crate) fn validate_module_abi(
         }
     }
 
-    validate_memory_exports(wasm, &meta.memories)
+    validate_memory_exports(wasm, &meta.memories)?;
+    validate_function_imports(module, meta)
+}
+
+fn validate_function_imports(module: &Module, meta: &weave_core::Meta) -> Result<()> {
+    let mut actual = Vec::new();
+    let mut has_poll = false;
+    for import in module.imports() {
+        let is_poll =
+            import.module() == names::IMPORT_MODULE && import.name() == names::IMPORT_POLL;
+        let function = match import.ty() {
+            wasmtime::ExternType::Func(function) => function,
+            _ if is_poll => bail!("weave.poll import must be a function"),
+            // The metadata format records function imports only. Custom
+            // embeddings can legitimately provide memory/table/global imports.
+            _ => continue,
+        };
+        let params = function
+            .params()
+            .map(core_value_type)
+            .collect::<Result<Vec<_>>>()?;
+        let results = function
+            .results()
+            .map(core_value_type)
+            .collect::<Result<Vec<_>>>()?;
+        if is_poll {
+            if has_poll {
+                bail!("module contains duplicate weave.poll imports");
+            }
+            if !params.is_empty() || results != [weave_core::ValType::I32] {
+                bail!("weave.poll import must have signature [] -> [I32]");
+            }
+            has_poll = true;
+        } else {
+            actual.push(weave_core::meta::ImportMeta {
+                module: import.module().into(),
+                name: import.name().into(),
+                params,
+                results,
+            });
+        }
+    }
+    if actual != meta.imports {
+        bail!("weave.meta function imports do not match the module's actual import names, order, and signatures");
+    }
+    Ok(())
 }
 
 fn read_val(ty: weave_core::ValType, bytes: &[u8]) -> Val {
@@ -1032,6 +1077,60 @@ mod tests {
     #[test]
     fn valid_module_abi_is_accepted() {
         validate_wat(VALID_ABI, &contract_meta()).unwrap();
+    }
+
+    #[test]
+    fn function_imports_must_match_metadata_names_order_and_signatures() {
+        let raw = wat::parse_str(
+            r#"(module
+            (import "custom" "first" (func (param i32) (result i64)))
+            (import "custom" "second" (func (param f32)))
+            (func (export "run")))"#,
+        )
+        .unwrap();
+        let module =
+            WeaveModule::from_raw(&raw, &weave_transform::TransformOptions::default()).unwrap();
+        let engine = crate::default_engine().unwrap();
+        module.validate(&engine).unwrap();
+        let variants: [fn(&mut weave_core::Meta); 7] = [
+            |meta| meta.imports.clear(),
+            |meta| meta.imports[0].name = "different".into(),
+            |meta| meta.imports[0].module = "different".into(),
+            |meta| meta.imports[0].params = vec![ValType::I64],
+            |meta| meta.imports[0].results.clear(),
+            |meta| meta.imports.swap(0, 1),
+            |meta| meta.imports.push(meta.imports[0].clone()),
+        ];
+        for mutate in variants {
+            let mut meta = (*module.meta).clone();
+            mutate(&mut meta);
+            let forged = WeaveModule::from_transformed((*module.wasm).clone(), meta);
+            let error = forged.validate(&engine).unwrap_err();
+            assert!(format!("{error:#}").contains("function imports do not match"));
+        }
+    }
+
+    #[test]
+    fn reserved_poll_import_is_checked_without_instantiation() {
+        for declaration in [
+            r#"(import "weave" "poll" (func))"#,
+            r#"(import "weave" "poll" (func (param i32) (result i32)))"#,
+            r#"(import "weave" "poll" (func (result i64)))"#,
+            r#"(import "weave" "poll" (global i32))"#,
+            r#"(import "weave" "poll" (func (result i32))) (import "weave" "poll" (func (result i32)))"#,
+        ] {
+            let module = VALID_ABI.replacen("(module", &format!("(module {declaration}"), 1);
+            assert!(
+                format!("{:#}", validate_wat(&module, &contract_meta()).unwrap_err())
+                    .contains("weave.poll")
+            );
+        }
+        let valid = VALID_ABI.replacen(
+            "(module",
+            r#"(module (import "weave" "poll" (func (result i32)))"#,
+            1,
+        );
+        validate_wat(&valid, &contract_meta()).unwrap();
     }
 
     #[test]

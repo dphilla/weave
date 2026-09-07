@@ -105,6 +105,26 @@ fn required_features(wasm: &[u8]) -> Result<Vec<String>> {
 fn finding(code: &str, message: impl Into<String>) -> Value {
     json!({"code":code,"message":message.into()})
 }
+
+fn add_memory(
+    memories: &mut Vec<Value>,
+    total: &mut u64,
+    memory: wasmparser::MemoryType,
+    imported: bool,
+) -> Result<()> {
+    let page_bytes = 1u64
+        .checked_shl(memory.page_size_log2.unwrap_or(16))
+        .context("memory page size overflow")?;
+    let bytes = memory
+        .initial
+        .checked_mul(page_bytes)
+        .context("memory size overflow")?;
+    *total = total
+        .checked_add(bytes)
+        .context("total memory size overflow")?;
+    memories.push(json!({"index":memories.len(),"imported":imported,"initial_pages":memory.initial,"initial_bytes":bytes,"maximum_pages":memory.maximum,"page_bytes":page_bytes,"shared":memory.shared,"memory64":memory.memory64}));
+    Ok(())
+}
 fn compare(
     caps: &Capabilities,
     imports: &[ImportCapability],
@@ -146,6 +166,11 @@ fn compare(
     // snapshots all three built-ins, including services unused by this guest.
     match &caps.services {
         Some(services) => {
+            let mut names = services.iter().map(String::as_str).collect::<Vec<_>>();
+            names.sort_unstable();
+            if names != ["env.emit", "env.emit32", "env.emit64"] {
+                failures.push(finding("SERVICE_SET_MISMATCH", "target snapshot service set must exactly match the CLI's three built-ins (no extra or duplicate services)"));
+            }
             for name in ["env.emit", "env.emit32", "env.emit64"] {
                 if !services.iter().any(|s| s == name) {
                     failures.push(finding(
@@ -209,23 +234,32 @@ pub(crate) fn run(args: &Args) -> Result<()> {
     let features = required_features(&module.wasm)?;
     let mut memories = vec![];
     let mut exports = vec![];
+    let mut non_function_imports = vec![];
+    let mut failures = vec![];
     let mut initial_memory_bytes = 0u64;
     for payload in wasmparser::Parser::new(0).parse_all(&module.wasm) {
         match payload? {
+            Payload::ImportSection(section) => {
+                for import in section {
+                    let import = import?;
+                    if !matches!(import.ty, wasmparser::TypeRef::Func(_)) {
+                        non_function_imports.push(json!({"module":import.module,"name":import.name,"type":format!("{:?}",import.ty)}));
+                        failures.push(finding(
+                            "UNSUPPORTED_IMPORT",
+                            format!(
+                                "CLI built-ins do not supply non-function import {}.{}",
+                                import.module, import.name
+                            ),
+                        ));
+                        if let wasmparser::TypeRef::Memory(memory) = import.ty {
+                            add_memory(&mut memories, &mut initial_memory_bytes, memory, true)?;
+                        }
+                    }
+                }
+            }
             Payload::MemorySection(section) => {
                 for memory in section {
-                    let memory = memory?;
-                    let page_bytes = 1u64
-                        .checked_shl(memory.page_size_log2.unwrap_or(16))
-                        .context("memory page size overflow")?;
-                    let bytes = memory
-                        .initial
-                        .checked_mul(page_bytes)
-                        .context("memory size overflow")?;
-                    initial_memory_bytes = initial_memory_bytes
-                        .checked_add(bytes)
-                        .context("total memory size overflow")?;
-                    memories.push(json!({"index":memories.len(),"initial_pages":memory.initial,"initial_bytes":bytes,"maximum_pages":memory.maximum,"page_bytes":page_bytes,"shared":memory.shared,"memory64":memory.memory64}));
+                    add_memory(&mut memories, &mut initial_memory_bytes, memory?, false)?;
                 }
             }
             Payload::ExportSection(section) => {
@@ -237,7 +271,6 @@ pub(crate) fn run(args: &Args) -> Result<()> {
             _ => {}
         }
     }
-    let mut failures = vec![];
     if let Err(e) = check_imports(&module.meta) {
         failures.push(finding("UNSUPPORTED_IMPORT", e.to_string()));
     }
@@ -291,7 +324,7 @@ pub(crate) fn run(args: &Args) -> Result<()> {
         "module_sha256":module.module_hash.iter().map(|b|format!("{b:02x}")).collect::<String>(),
         "module_bytes":module.wasm.len(),"metadata_version":module.meta.version,"poll_period":module.meta.poll_period,
         "entries":module.meta.entries.iter().map(|e| json!({"name":e.name,"params":types(&e.params),"results":types(&e.results)})).collect::<Vec<_>>(),
-        "imports":imports,"exports":exports,"required_features":features,
+        "imports":imports,"non_function_imports":non_function_imports,"exports":exports,"required_features":features,
         "resources":{"initial_memory_bytes":initial_memory_bytes,"memories":memories,"services":["env.emit","env.emit32","env.emit64"],"growth":"not bounded by preflight; later growth and snapshots may exceed target limits"},
         "target":target,"findings":failures,"retry":"never",
         "limitations":["No guest code or constructors were executed; runtime behavior and termination are not proven.","Target capabilities are unauthenticated advertisements, not a reservation or execution guarantee.","This profile checks the central CLI built-ins; custom library hosts must validate their own import and service contracts.","Initial memory checks do not reserve memory or bound future guest growth."]
@@ -368,6 +401,17 @@ mod tests {
         caps.limits.module_bytes = Some(1);
         let findings = compare(&caps, &[], &["unadvertised".into()], 2, 2);
         assert_eq!(findings.len(), 3);
+    }
+
+    #[test]
+    fn extra_or_duplicate_services_are_not_compatible() {
+        for extra in ["custom", "env.emit"] {
+            let mut caps = builtin_capabilities();
+            caps.services.as_mut().unwrap().push(extra.into());
+            assert!(compare(&caps, &[], &[], 0, 0)
+                .iter()
+                .any(|f| f["code"] == "SERVICE_SET_MISMATCH"));
+        }
     }
     #[test]
     fn feature_detection_distinguishes_multimemory_and_simd() {

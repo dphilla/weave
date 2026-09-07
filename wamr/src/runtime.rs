@@ -1111,7 +1111,12 @@ fn poll_impl(exec_env: ffi::WasmExecEnv) -> Result<i32> {
                 host.n_mems,
                 host.source_options.clone(),
             ) {
-                Ok(migration) => host.poll = PollState::Migrating(Box::new(migration)),
+                Ok(mut migration) => {
+                    if let Some(shared) = &host.shared {
+                        migration.attach_retirement_flag(shared.retirement_flag());
+                    }
+                    host.poll = PollState::Migrating(Box::new(migration));
+                }
                 Err(error) => {
                     if let Some(shared) = &host.shared {
                         shared.attempt_failed(format!("migration failed to start: {error:#}"));

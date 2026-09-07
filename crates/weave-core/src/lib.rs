@@ -8,6 +8,7 @@
 //!  - the peer-to-peer migration wire protocol frames
 //!  - the portable snapshot container (checkpoint-to-file / restore-from-file)
 
+pub mod control;
 pub mod meta;
 pub mod names;
 pub mod sha256;

@@ -908,7 +908,11 @@ fn validate_meta_layout(meta: &weave_core::Meta) -> Result<()> {
     Ok(())
 }
 
-fn validate_module_abi(module: &Module, wasm: &[u8], meta: &weave_core::Meta) -> Result<()> {
+pub(crate) fn validate_module_abi(
+    module: &Module,
+    wasm: &[u8],
+    meta: &weave_core::Meta,
+) -> Result<()> {
     validate_meta_layout(meta)?;
     validate_function_export(module, names::F_INIT, &[], &[])?;
     validate_function_export(module, names::F_RESUME, &[], &[])?;

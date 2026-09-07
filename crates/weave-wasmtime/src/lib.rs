@@ -57,6 +57,17 @@ impl WeaveModule {
             module_hash,
         }
     }
+
+    /// Compile and validate the complete woven ABI without instantiating the
+    /// guest, invoking imports, or running its original start function.
+    /// This checks engine compatibility and metadata/export agreement, not
+    /// application host-service compatibility or the workload's behavior.
+    pub fn validate(&self, engine: &Engine) -> Result<()> {
+        let module = wasmtime::Module::from_binary(engine, &self.wasm)
+            .context("compiling woven module for inspection")?;
+        instance::validate_module_abi(&module, &self.wasm, &self.meta)
+            .context("validating woven module ABI")
+    }
 }
 
 /// Build an engine configured the way Weave needs (reference types + bulk
@@ -67,4 +78,29 @@ pub fn default_engine() -> Result<Engine> {
     config.wasm_bulk_memory(true);
     config.wasm_simd(true);
     Engine::new(&config).context("creating wasmtime engine")
+}
+
+#[cfg(test)]
+mod inspection_tests {
+    use super::*;
+
+    #[test]
+    fn validation_does_not_execute_original_start_or_imports() {
+        let raw = wat::parse_str(
+            r#"(module
+            (import "missing" "effect" (func $effect))
+            (func $start call $effect unreachable)
+            (start $start)
+            (func (export "run") (result i32) i32.const 7))"#,
+        )
+        .unwrap();
+        let module = WeaveModule::from_raw(&raw, &TransformOptions::default()).unwrap();
+        let engine = default_engine().unwrap();
+        // No linker/services exist; executing init would fail immediately.
+        module.validate(&engine).unwrap();
+        let mut wrong_meta = (*module.meta).clone();
+        wrong_meta.memories[0] = "missing-memory".into();
+        let wrong = WeaveModule::from_transformed((*module.wasm).clone(), wrong_meta);
+        assert!(wrong.validate(&engine).is_err());
+    }
 }

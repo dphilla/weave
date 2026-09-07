@@ -16,100 +16,96 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::VecDeque;
-use std::io::{BufReader, BufWriter, Write};
-use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use wasmtime::Val;
-use weave_core::wire::Frame;
 use weave_core::{Meta, ValType};
 use weave_host::HostService;
 use weave_transform::TransformOptions;
 use weave_wasmtime::instance::LinkFn;
-use weave_wasmtime::serve::{serve, InitialWork, NodeConfig, NodeFactories};
+use weave_wasmtime::serve::{serve_with_capabilities, InitialWork, NodeConfig, NodeFactories};
 use weave_wasmtime::{default_engine, WeaveInstance, WeaveModule, WorkResult};
+
+mod args;
+mod control;
+mod inspect;
+use args::Args;
+
+#[derive(Debug)]
+struct Reported(i32);
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reported failure")
+    }
+}
+impl std::error::Error for Reported {}
+
+#[derive(Debug)]
+struct CliError {
+    code: &'static str,
+    message: String,
+    exit: i32,
+}
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for CliError {}
+fn cli_error(code: &'static str, exit: i32, message: impl Into<String>) -> anyhow::Error {
+    CliError {
+        code,
+        message: message.into(),
+        exit,
+    }
+    .into()
+}
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("weave: error: {e:#}");
-        std::process::exit(1);
-    }
-}
-
-struct Args {
-    positional: Vec<String>,
-    flags: Vec<(String, Option<String>)>,
-}
-
-impl Args {
-    fn parse(mut argv: VecDeque<String>) -> Args {
-        let mut positional = Vec::new();
-        let mut flags = Vec::new();
-        while let Some(a) = argv.pop_front() {
-            if let Some(name) = a.strip_prefix("--") {
-                let has_value = matches!(
-                    name,
-                    "o" | "out"
-                        | "period"
-                        | "stack-pages"
-                        | "invoke"
-                        | "arg"
-                        | "after-polls"
-                        | "listen"
-                        | "module"
-                        | "node"
-                        | "to"
-                        | "budget"
-                        | "max-rounds"
-                        | "dirty-threshold"
-                );
-                let v = if has_value { argv.pop_front() } else { None };
-                flags.push((name.to_string(), v));
-            } else if a == "-o" {
-                flags.push(("o".to_string(), argv.pop_front()));
-            } else {
-                positional.push(a);
-            }
+        if let Some(reported) = e.downcast_ref::<Reported>() {
+            std::process::exit(reported.0);
         }
-        Args { positional, flags }
-    }
-
-    fn flag(&self, name: &str) -> Option<&str> {
-        self.flags
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .and_then(|(_, v)| v.as_deref())
-    }
-
-    fn has(&self, name: &str) -> bool {
-        self.flags.iter().any(|(n, _)| n == name)
-    }
-
-    fn multi(&self, name: &str) -> Vec<String> {
-        self.flags
-            .iter()
-            .filter(|(n, _)| n == name)
-            .filter_map(|(_, v)| v.clone())
-            .collect()
+        let (code, exit) = e
+            .downcast_ref::<CliError>()
+            .map(|e| (e.code, e.exit))
+            .unwrap_or(("COMMAND_FAILED", 4));
+        if std::env::args().any(|a| a == "--json") {
+            println!(
+                "{}",
+                serde_json::json!({"schema_version":1,"ok":false,"code":code,"message":format!("{e:#}"),"retry":"never"})
+            );
+        } else {
+            eprintln!("weave: {code}: {e:#}");
+        }
+        std::process::exit(exit);
     }
 }
 
 fn run() -> Result<()> {
     let mut argv: VecDeque<String> = std::env::args().skip(1).collect();
-    let cmd = argv.pop_front().ok_or_else(|| anyhow!(USAGE))?;
-    let args = Args::parse(argv);
+    let cmd = argv
+        .pop_front()
+        .ok_or_else(|| cli_error("USAGE_ERROR", 2, USAGE))?;
+    if matches!(cmd.as_str(), "help" | "--help" | "-h") {
+        println!(
+            "{}",
+            args::help(argv.front().map(String::as_str).unwrap_or(""))
+        );
+        return Ok(());
+    }
+    let args = Args::parse(&cmd, argv).map_err(|e| cli_error("USAGE_ERROR", 2, e.to_string()))?;
+    if args.has("help") {
+        println!("{}", args::help(&cmd));
+        return Ok(());
+    }
     match cmd.as_str() {
         "transform" => cmd_transform(&args),
         "run" => cmd_run(&args),
         "checkpoint" => cmd_checkpoint(&args),
         "restore" => cmd_restore(&args),
         "serve" => cmd_serve(&args),
-        "migrate" => cmd_ctl(&args, true),
-        "status" => cmd_ctl(&args, false),
-        "help" | "--help" | "-h" => {
-            println!("{USAGE}");
-            Ok(())
-        }
+        "inspect" => inspect::run(&args),
+        "migrate" | "status" | "operation" => control::run(&cmd, &args),
         other => bail!("unknown command {other}\n{USAGE}"),
     }
 }
@@ -120,18 +116,23 @@ const USAGE: &str = "usage:
   weave checkpoint MODULE --invoke NAME [--arg V]... --after-polls N -o SNAP [--pre-woven]
   weave restore MODULE SNAP [--pre-woven]
   weave serve --listen ADDR [--module M --invoke NAME [--arg V]...] [--pre-woven] [--exit-on-done]
-  weave migrate --node ADDR --to ADDR
-  weave status --node ADDR";
+  weave inspect MODULE [--invoke NAME --arg V ...] [--node ADDR] [--json]
+  weave migrate --node ADDR --to ADDR [--operation-id ID --node-epoch EPOCH] [--json]
+  weave status --node ADDR [--json]
+  weave operation --node ADDR --operation-id ID --node-epoch EPOCH [--wait] [--json]
+Use weave COMMAND --help for options. JSON is supported by inspect/status/migrate/operation.
+Exit codes: 0 success/accepted; 2 usage; 3 incompatible/unknown preflight; 4 failure;
+5 commit or delivery uncertain; 6 wait expired (not proof of failure).";
 
-fn transform_opts(args: &Args) -> TransformOptions {
+fn transform_opts(args: &Args) -> Result<TransformOptions> {
     let mut o = TransformOptions::default();
     if let Some(p) = args.flag("period") {
-        o.poll_period = p.parse().expect("bad --period");
+        o.poll_period = p.parse().context("invalid --period")?;
     }
     if let Some(p) = args.flag("stack-pages") {
-        o.stack_pages = p.parse().expect("bad --stack-pages");
+        o.stack_pages = p.parse().context("invalid --stack-pages")?;
     }
-    o
+    Ok(o)
 }
 
 fn load_module(path: &str, args: &Args) -> Result<WeaveModule> {
@@ -145,7 +146,7 @@ fn load_module(path: &str, args: &Args) -> Result<WeaveModule> {
         let meta = extract_meta(&bytes)?;
         Ok(WeaveModule::from_transformed(bytes, meta))
     } else {
-        WeaveModule::from_raw(&bytes, &transform_opts(args))
+        WeaveModule::from_raw(&bytes, &transform_opts(args)?)
     }
 }
 
@@ -172,7 +173,7 @@ fn cmd_transform(args: &Args) -> Result<()> {
     } else {
         bytes
     };
-    let res = weave_transform::transform(&bytes, &transform_opts(args))?;
+    let res = weave_transform::transform(&bytes, &transform_opts(args)?)?;
     std::fs::write(out, &res.wasm).with_context(|| format!("writing {out}"))?;
     eprintln!(
         "woven {} -> {} ({} bytes, {} entries, poll period {})",
@@ -299,13 +300,15 @@ impl ServiceSet {
 
 fn check_imports(meta: &Meta) -> Result<()> {
     for imp in &meta.imports {
-        let known = matches!(
-            (imp.module.as_str(), imp.name.as_str()),
-            ("env", "emit") | ("env", "emit32") | ("env", "emit64")
-        );
+        let known = inspect::builtin_imports().iter().any(|provided| {
+            provided.module == imp.module
+                && provided.name == imp.name
+                && provided.params == inspect::types(&imp.params)
+                && provided.results == inspect::types(&imp.results)
+        });
         if !known {
             bail!(
-                "module imports {}.{} which this runner does not provide \
+                "module imports {}.{} with a signature this runner does not provide \
                  (built-ins: env.emit(i32,i64), env.emit32(i32), env.emit64(i64))",
                 imp.module,
                 imp.name
@@ -484,31 +487,11 @@ fn cmd_serve(args: &Args) -> Result<()> {
         make_services: Box::new(move || (set_services.services(), vec![])),
         make_link: Box::new(move || set_link.link()),
     };
-    serve(&engine, config, factories, initial)
-}
-
-fn cmd_ctl(args: &Args, migrate: bool) -> Result<()> {
-    let node = args.flag("node").ok_or_else(|| anyhow!("missing --node"))?;
-    let conn = TcpStream::connect(node).with_context(|| format!("connecting to {node}"))?;
-    conn.set_nodelay(true).ok();
-    let mut w = BufWriter::new(conn.try_clone()?);
-    let mut r = BufReader::new(conn);
-    if migrate {
-        let to = args.flag("to").ok_or_else(|| anyhow!("missing --to"))?;
-        Frame::CtlMigrate {
-            target: to.to_string(),
-        }
-        .write_to(&mut w)?;
-    } else {
-        Frame::CtlStatus.write_to(&mut w)?;
-    }
-    w.flush()?;
-    match Frame::read_from(&mut r)? {
-        Frame::CtlOk { msg } => {
-            println!("ok: {msg}");
-            Ok(())
-        }
-        Frame::CtlErr { msg } => bail!("node error: {msg}"),
-        other => bail!("unexpected reply {other:?}"),
-    }
+    serve_with_capabilities(
+        &engine,
+        config,
+        factories,
+        initial,
+        inspect::builtin_capabilities(),
+    )
 }

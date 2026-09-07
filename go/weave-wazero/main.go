@@ -134,6 +134,7 @@ type shared struct {
 	lastResult       string
 	active           bool
 	incomingReserved bool
+	control          *controlState
 }
 
 type migrationRequest struct {
@@ -147,6 +148,13 @@ func (s *shared) completeRequestLocked(result string) {
 		s.request.result <- result
 		s.request = nil
 	}
+}
+
+func (s *shared) completeControlLocked(completion controlCompletion, result string) {
+	if s.control != nil {
+		s.control.complete(completion, result)
+	}
+	s.completeRequestLocked(result)
 }
 
 func cmdServe(f *flags) error {
@@ -164,7 +172,15 @@ func cmdServe(f *flags) error {
 		opts.dirtyThreshold, _ = strconv.Atoi(v)
 	}
 	_, startsActive := f.vals["module"]
-	sh := &shared{active: startsActive}
+	lifecycle := "idle"
+	if startsActive {
+		lifecycle = "running"
+	}
+	control, err := newControlState(lifecycle)
+	if err != nil {
+		return err
+	}
+	sh := &shared{active: startsActive, control: control}
 	moduleCache := map[[32]byte][]byte{}
 	incoming := make(chan net.Conn, 1)
 
@@ -201,9 +217,14 @@ func cmdServe(f *flags) error {
 					m, err := connectSource(target, inst, "wazero", opts)
 					if err != nil {
 						sh.mu.Lock()
-						sh.completeRequestLocked(fmt.Sprintf("migration failed to start: %v", err))
+						sh.completeControlLocked(controlFailedBeforeCommit, fmt.Sprintf("migration failed to start: %v", err))
 						sh.mu.Unlock()
 					} else {
+						m.onPrepared = func() {
+							sh.mu.Lock()
+							sh.control.sourceRetired()
+							sh.mu.Unlock()
+						}
 						mig = m
 					}
 				}
@@ -213,7 +234,7 @@ func cmdServe(f *flags) error {
 				if err != nil {
 					_ = mig.conn.Close()
 					sh.mu.Lock()
-					sh.completeRequestLocked(fmt.Sprintf("migration failed: %v", err))
+					sh.completeControlLocked(controlFailedBeforeCommit, fmt.Sprintf("migration failed: %v", err))
 					sh.mu.Unlock()
 					mig = nil
 					return 0
@@ -238,7 +259,7 @@ func cmdServe(f *flags) error {
 			fmt.Fprintf(os.Stderr, "weave: workload trapped: %v\n", err)
 			sh.mu.Lock()
 			sh.active = false
-			sh.completeRequestLocked(fmt.Sprintf("trap: %v", err))
+			sh.completeControlLocked(controlWorkloadTrapped, fmt.Sprintf("trap: %v", err))
 			sh.mu.Unlock()
 			return "done"
 		}
@@ -259,13 +280,17 @@ func cmdServe(f *flags) error {
 					fmt.Println(marker)
 					sh.mu.Lock()
 					sh.active = false
-					sh.completeRequestLocked(msg)
+					completion := controlMigrated
+					if !stats.commitConfirmed {
+						completion = controlCommitUncertain
+					}
+					sh.completeControlLocked(completion, msg)
 					sh.mu.Unlock()
 					return "migrated"
 				}
 				fmt.Fprintf(os.Stderr, "weave: final copy failed (%v), resuming locally\n", err)
 				sh.mu.Lock()
-				sh.completeRequestLocked(fmt.Sprintf("migration failed: %v", err))
+				sh.completeControlLocked(controlFailedBeforeCommit, fmt.Sprintf("migration failed: %v", err))
 				sh.mu.Unlock()
 				mig = nil
 			}
@@ -277,7 +302,7 @@ func cmdServe(f *flags) error {
 				fmt.Fprintf(os.Stderr, "weave: workload trapped: %v\n", err)
 				sh.mu.Lock()
 				sh.active = false
-				sh.completeRequestLocked(fmt.Sprintf("trap: %v", err))
+				sh.completeControlLocked(controlWorkloadTrapped, fmt.Sprintf("trap: %v", err))
 				sh.mu.Unlock()
 				return "done"
 			}
@@ -291,7 +316,7 @@ func cmdServe(f *flags) error {
 			fmt.Fprintf(os.Stderr, "weave: reading workload results failed: %v\n", err)
 			sh.mu.Lock()
 			sh.active = false
-			sh.completeRequestLocked(fmt.Sprintf("trap: reading results: %v", err))
+			sh.completeControlLocked(controlWorkloadTrapped, fmt.Sprintf("trap: reading results: %v", err))
 			sh.mu.Unlock()
 			return "done"
 		}
@@ -299,7 +324,7 @@ func cmdServe(f *flags) error {
 		fmt.Printf("WEAVE_DONE [%s]\n", strings.Join(res, ", "))
 		sh.mu.Lock()
 		sh.active = false
-		sh.completeRequestLocked(msg)
+		sh.completeControlLocked(controlWorkloadCompleted, msg)
 		sh.mu.Unlock()
 		return "done"
 	}
@@ -344,6 +369,7 @@ func cmdServe(f *flags) error {
 		if err != nil {
 			sh.mu.Lock()
 			sh.incomingReserved = false
+			sh.control.setLifecycle("idle")
 			sh.mu.Unlock()
 			fmt.Fprintf(os.Stderr, "weave: incoming migration failed: %v\n", err)
 			continue
@@ -352,6 +378,7 @@ func cmdServe(f *flags) error {
 		sh.incomingReserved = false
 		sh.active = true
 		sh.lastResult = ""
+		sh.control.setLifecycle("running")
 		sh.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "weave: workload received from %s, resuming\n", from)
 		driveWorkload(inst, "", nil, true)
@@ -384,12 +411,18 @@ func classifyConn(conn net.Conn, sh *shared, incoming chan<- net.Conn) {
 			return
 		}
 		sh.incomingReserved = true
+		if sh.control != nil {
+			sh.control.setLifecycle("accepting")
+		}
 		sh.mu.Unlock()
 		select {
 		case incoming <- peekedConn{Conn: conn, r: br}:
 		default:
 			sh.mu.Lock()
 			sh.incomingReserved = false
+			if sh.control != nil {
+				sh.control.setLifecycle("idle")
+			}
 			sh.mu.Unlock()
 			w := bufio.NewWriter(conn)
 			abortFrame(w, 9, "node busy")
@@ -428,6 +461,9 @@ func classifyConn(conn net.Conn, sh *shared, incoming chan<- net.Conn) {
 		} else {
 			sh.request = &migrationRequest{target: target, result: result}
 			sh.lastResult = ""
+			if sh.control != nil {
+				sh.control.setLifecycle("migrating")
+			}
 		}
 		sh.mu.Unlock()
 		if rejection != "" {
@@ -467,6 +503,38 @@ func classifyConn(conn net.Conn, sh *shared, incoming chan<- net.Conn) {
 		p.str(res)
 		writeFrame(w, FtCtlOk, p.Bytes())
 		w.Flush()
+	case FtCtlRequest:
+		_ = conn.SetWriteDeadline(time.Now().Add(migrationIOTimeout))
+		request, decodeErr := decodeControlRequest(f.payload)
+		sh.mu.Lock()
+		if sh.control == nil {
+			lifecycle := "idle"
+			if sh.active {
+				lifecycle = "running"
+			}
+			sh.control, err = newControlState(lifecycle)
+			if err != nil {
+				sh.mu.Unlock()
+				return
+			}
+		}
+		var response controlResponse
+		if decodeErr != nil {
+			response = sh.control.response(false, "INVALID_REQUEST", decodeErr.Error(), "never")
+		} else {
+			var accepted *controlOperation
+			response, accepted = sh.control.handle(request, sh.active && sh.request == nil && !sh.incomingReserved)
+			if accepted != nil {
+				sh.request = &migrationRequest{target: accepted.Target, result: make(chan string, 1)}
+				sh.lastResult = ""
+			}
+		}
+		payload, encodeErr := response.encode()
+		sh.mu.Unlock()
+		if encodeErr == nil {
+			_ = writeFrame(w, FtCtlResponse, payload)
+			_ = w.Flush()
+		}
 	}
 }
 

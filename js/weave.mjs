@@ -810,11 +810,14 @@ export const FT = {
   MODULE_OK: 6, MEM_LAYOUT: 7, PAGE: 8, ROUND_END: 9, ROUND_ACK: 10,
   FINAL_BEGIN: 11, GLOBALS: 12, SERVICES: 13, FINAL_END: 14, PREPARED: 15,
   ABORT: 16, CTL_MIGRATE: 17, CTL_STATUS: 18, CTL_OK: 19, CTL_ERR: 20,
-  COMMIT: 21, COMMIT_OK: 22,
+  COMMIT: 21, COMMIT_OK: 22, CTL_REQUEST: 23, CTL_RESPONSE: 24,
 };
 
 export function frame(type, payload = new Uint8Array(0)) {
   if (!(payload instanceof Uint8Array)) throw new TypeError("frame payload must be Uint8Array");
+  if ((type === FT.CTL_REQUEST || type === FT.CTL_RESPONSE) && payload.length > 65536) {
+    throw new Error(`control frame payload too large: ${payload.length}`);
+  }
   if (payload.length > 64 * 1024 * 1024) {
     throw new Error(`frame payload too large: ${payload.length}`);
   }
@@ -850,6 +853,7 @@ export async function readFrame(t) {
   }
   const type = hdr[0];
   const len = new DataView(hdr.buffer, hdr.byteOffset).getUint32(1, true);
+  if ((type === FT.CTL_REQUEST || type === FT.CTL_RESPONSE) && len > 65536) throw new Error(`control frame too large: ${len}`);
   if (len > 64 * 1024 * 1024) throw new Error(`frame too large: ${len}`);
   const payload = len ? await t.readExact(len) : new Uint8Array(0);
   if (!(payload instanceof Uint8Array) || payload.length !== len) {

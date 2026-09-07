@@ -6,6 +6,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::time::Duration;
+use weave_core::control::{Capabilities, Completion, ImportCapability};
 use weave_core::wire::Frame;
 use weave_core::{Meta, Val};
 use weave_host::source::{MigrationStats, SourceOptions};
@@ -43,7 +44,10 @@ pub fn serve(config: NodeConfig, initial: Option<InitialWork>) -> Result<()> {
         TcpListener::bind(&config.listen).with_context(|| format!("binding {}", config.listen))?;
     eprintln!("weave-wamr: listening on {}", listener.local_addr()?);
 
-    let shared = SharedControl::new(initial.is_some());
+    let shared = SharedControl::with_capabilities(
+        initial.is_some(),
+        control_capabilities(config.max_memory_bytes),
+    )?;
     let (sender, receiver) = mpsc::channel();
     spawn_listener(listener, shared.clone(), sender);
 
@@ -85,6 +89,7 @@ pub fn serve(config: NodeConfig, initial: Option<InitialWork>) -> Result<()> {
                 };
                 match run_target_session(connection, &mut driver) {
                     Ok(received) => {
+                        shared.incoming_committed();
                         eprintln!(
                             "weave-wamr: workload received from {}, resuming",
                             received.source_runtime
@@ -97,7 +102,7 @@ pub fn serve(config: NodeConfig, initial: Option<InitialWork>) -> Result<()> {
                     }
                     Err(error) => {
                         eprintln!("weave-wamr: incoming migration failed: {error:#}");
-                        shared.workload_finished(format!("incoming migration failed: {error:#}"));
+                        shared.incoming_failed(format!("incoming migration failed: {error:#}"));
                     }
                 }
             }
@@ -112,7 +117,7 @@ pub fn serve(config: NodeConfig, initial: Option<InitialWork>) -> Result<()> {
                         let rendered = render_values(&values);
                         let message = format!("done: [{}]", rendered.join(", "));
                         println!("WEAVE_DONE [{}]", rendered.join(", "));
-                        shared.workload_finished(message);
+                        shared.workload_finished(Completion::WorkloadCompleted, message);
                         if config.exit_on_done {
                             wait_for_resumed_exit_ack(&phase);
                             return Ok(());
@@ -133,7 +138,7 @@ pub fn serve(config: NodeConfig, initial: Option<InitialWork>) -> Result<()> {
                                     }
                                     eprintln!("weave-wamr: {message}");
                                     println!("{}", migration_marker(&stats));
-                                    shared.workload_finished(message);
+                                    shared.workload_finished(migration_completion(&stats), message);
                                     if config.exit_on_done {
                                         // Let the control connection observe the completed
                                         // request and flush CTL_OK/CTL_ERR before main exits
@@ -161,7 +166,10 @@ pub fn serve(config: NodeConfig, initial: Option<InitialWork>) -> Result<()> {
                     Err(error) => {
                         eprintln!("weave-wamr: workload trapped: {error:#}");
                         println!("WEAVE_TRAP {error:#}");
-                        shared.workload_finished(format!("trap: {error:#}"));
+                        shared.workload_finished(
+                            Completion::WorkloadTrapped,
+                            format!("trap: {error:#}"),
+                        );
                         if config.exit_on_done {
                             wait_for_resumed_exit_ack(&phase);
                             return Err(error);
@@ -216,7 +224,7 @@ fn handle_connection(
     if first[0] == 1 {
         if shared.try_reserve_incoming() {
             if sender.send(Event::Incoming(connection)).is_err() {
-                shared.workload_finished("ingress listener stopped".to_owned());
+                shared.incoming_failed("ingress listener stopped".to_owned());
             }
         } else {
             reject_busy(connection)?;
@@ -228,24 +236,37 @@ fn handle_connection(
     match Frame::read_from(&mut reader)? {
         Frame::CtlMigrate { target } => {
             let mut writer = BufWriter::new(connection);
-            if let Err(error) = shared.request_migration(target) {
-                Frame::CtlErr {
-                    msg: format!("{error:#}"),
+            let response = match shared.request_migration(target) {
+                Ok(response) => response,
+                Err(error) => {
+                    Frame::CtlErr {
+                        msg: format!("{error:#}"),
+                    }
+                    .write_to(&mut writer)?;
+                    writer.flush()?;
+                    return Ok(());
                 }
-                .write_to(&mut writer)?;
-                writer.flush()?;
-                return Ok(());
-            }
-            match shared.wait_for_request(Duration::from_secs(120)) {
-                Ok(message) if control_result_succeeded(&message) => {
+            };
+            match response.recv_timeout(Duration::from_secs(120)) {
+                Ok((completion, message)) if control_result_succeeded(completion) => {
                     Frame::CtlOk { msg: message }.write_to(&mut writer)?;
                 }
-                Ok(message) => Frame::CtlErr { msg: message }.write_to(&mut writer)?,
+                Ok((_, message)) => Frame::CtlErr { msg: message }.write_to(&mut writer)?,
                 Err(error) => Frame::CtlErr {
                     msg: format!("{error:#}"),
                 }
                 .write_to(&mut writer)?,
             }
+            writer.flush()?;
+            Ok(())
+        }
+        Frame::CtlRequest { json } => {
+            let response = shared.structured_request(&json);
+            let mut writer = BufWriter::new(connection);
+            Frame::CtlResponse {
+                json: response.to_json()?,
+            }
+            .write_to(&mut writer)?;
             writer.flush()?;
             Ok(())
         }
@@ -268,7 +289,43 @@ fn set_initial_read_timeout(connection: &TcpStream) -> Result<()> {
     // own read/write deadlines immediately afterward.
     connection
         .set_read_timeout(Some(INITIAL_FRAME_TIMEOUT))
-        .context("setting initial connection read timeout")
+        .context("setting initial connection read timeout")?;
+    connection
+        .set_write_timeout(Some(INITIAL_FRAME_TIMEOUT))
+        .context("setting initial connection write timeout")
+}
+
+fn control_capabilities(max_memory_bytes: u64) -> Capabilities {
+    let mut capabilities = Capabilities::unknown("wamr");
+    capabilities.adapter_version = env!("CARGO_PKG_VERSION").to_owned();
+    capabilities.services = Some(
+        ["env.emit", "env.emit32", "env.emit64"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    );
+    capabilities.imports = Some(
+        [
+            ("emit", vec!["i32", "i64"]),
+            ("emit32", vec!["i32"]),
+            ("emit64", vec!["i64"]),
+        ]
+        .into_iter()
+        .map(|(name, params)| ImportCapability {
+            module: "env".to_owned(),
+            name: name.to_owned(),
+            params: params.into_iter().map(str::to_owned).collect(),
+            results: vec![],
+        })
+        .collect(),
+    );
+    capabilities.features = ["bulk-memory", "reference-types", "simd", "multi-memory"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    capabilities.limits.memory_bytes = Some(max_memory_bytes);
+    capabilities.limits.module_bytes = Some(weave_host::target::MAX_MODULE_SIZE);
+    capabilities
 }
 
 fn migration_outcome_message(stats: &MigrationStats) -> String {
@@ -283,8 +340,19 @@ fn migration_outcome_message(stats: &MigrationStats) -> String {
     }
 }
 
-fn control_result_succeeded(message: &str) -> bool {
-    message.starts_with("migrated:") || message.starts_with("done:")
+fn migration_completion(stats: &MigrationStats) -> Completion {
+    if stats.commit_confirmed {
+        Completion::Migrated
+    } else {
+        Completion::CommitUncertain
+    }
+}
+
+fn control_result_succeeded(completion: Completion) -> bool {
+    matches!(
+        completion,
+        Completion::Migrated | Completion::WorkloadCompleted
+    )
 }
 
 fn migration_marker(stats: &MigrationStats) -> &'static str {
@@ -436,6 +504,194 @@ pub fn render_values(values: &[Val]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use weave_core::control::{Action, Lifecycle, Ownership, Request, Response, SCHEMA_VERSION};
+
+    fn connection_pair(shared: Shared) -> (TcpStream, std::thread::JoinHandle<Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let worker = std::thread::spawn(move || {
+            let (connection, _) = listener.accept()?;
+            let (sender, _receiver) = mpsc::channel();
+            handle_connection(connection, &shared, &sender)
+        });
+        (client, worker)
+    }
+
+    fn structured_exchange(shared: Shared, json: Vec<u8>) -> Response {
+        let (mut client, worker) = connection_pair(shared);
+        Frame::CtlRequest { json }.write_to(&mut client).unwrap();
+        let frame = Frame::read_from(&mut client).unwrap();
+        worker.join().unwrap().unwrap();
+        match frame {
+            Frame::CtlResponse { json } => Response::from_json(&json).unwrap(),
+            other => panic!("expected structured response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structured_status_advertises_exact_builtins_and_receive_limits() {
+        let shared = SharedControl::with_capabilities(false, control_capabilities(123456)).unwrap();
+        let response = structured_exchange(shared, Request::status().to_json().unwrap());
+        assert_eq!(response.code, "STATUS_OK");
+        assert_eq!(response.lifecycle, Lifecycle::Idle);
+        assert_eq!(response.ownership, Ownership::None);
+        assert_eq!(response.node_epoch.len(), 32);
+        let capabilities = response.capabilities.unwrap();
+        assert_eq!(capabilities.runtime, "wamr");
+        assert_eq!(capabilities.adapter_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(capabilities.migration_protocol, 2);
+        assert_eq!(
+            capabilities.services.unwrap(),
+            ["env.emit", "env.emit32", "env.emit64"]
+        );
+        let imports = capabilities.imports.unwrap();
+        assert_eq!(imports.len(), 3);
+        assert_eq!(imports[0].module, "env");
+        assert_eq!(imports[0].name, "emit");
+        assert_eq!(imports[0].params, ["i32", "i64"]);
+        assert!(imports.iter().all(|import| import.results.is_empty()));
+        assert_eq!(capabilities.limits.control_frame_bytes, 65536);
+        assert_eq!(capabilities.limits.retained_operations, 256);
+        assert_eq!(capabilities.limits.operation_id_bytes, 128);
+        assert_eq!(capabilities.limits.memory_bytes, Some(123456));
+        assert_eq!(
+            capabilities.limits.module_bytes,
+            Some(weave_host::target::MAX_MODULE_SIZE)
+        );
+        assert!(capabilities.features.contains(&"multi-memory".to_owned()));
+        assert!(!capabilities.features.contains(&"threads".to_owned()));
+    }
+
+    #[test]
+    fn structured_malformed_json_is_rejected_without_stopping_later_queries() {
+        let shared = SharedControl::new(true);
+        for json in [
+            b"{".to_vec(),
+            vec![0xff],
+            b"null".to_vec(),
+            vec![b' '; 65536],
+        ] {
+            let response = structured_exchange(shared.clone(), json);
+            assert!(!response.ok);
+            assert_eq!(response.code, "INVALID_REQUEST");
+            assert_eq!(response.lifecycle, Lifecycle::Running);
+        }
+        assert_eq!(
+            structured_exchange(shared, Request::status().to_json().unwrap()).code,
+            "STATUS_OK"
+        );
+    }
+
+    #[test]
+    fn structured_accept_returns_before_work_and_operation_remains_queryable() {
+        let shared = SharedControl::new(true);
+        let epoch =
+            structured_exchange(shared.clone(), Request::status().to_json().unwrap()).node_epoch;
+        let mut request = Request {
+            schema_version: SCHEMA_VERSION,
+            action: Action::Migrate,
+            node_epoch: Some(epoch),
+            operation_id: Some("socket-operation".into()),
+            target: Some("localhost:9102".into()),
+        };
+        let accepted = structured_exchange(shared.clone(), request.to_json().unwrap());
+        assert_eq!(accepted.code, "ACCEPTED");
+        // No VM worker is present, so a legacy-style wait would time out.
+        assert_eq!(shared.requested_target().as_deref(), Some("localhost:9102"));
+        assert_eq!(
+            structured_exchange(shared.clone(), request.to_json().unwrap()).operation,
+            accepted.operation
+        );
+        shared.workload_finished(
+            Completion::CommitUncertain,
+            "acknowledgement not received".into(),
+        );
+        request.action = Action::Operation;
+        request.target = None;
+        let result = structured_exchange(shared, request.to_json().unwrap());
+        assert_eq!(result.code, "COMMIT_UNCERTAIN");
+        assert_eq!(result.ownership, Ownership::Retired);
+    }
+
+    #[test]
+    fn oversized_control_frame_is_rejected_before_receiving_payload() {
+        for frame_type in [23, 24] {
+            let shared = SharedControl::new(true);
+            let (mut client, worker) = connection_pair(shared.clone());
+            let mut header = vec![frame_type];
+            header.extend_from_slice(
+                &((weave_core::wire::MAX_CONTROL_FRAME + 1) as u32).to_le_bytes(),
+            );
+            client.write_all(&header).unwrap();
+            let mut byte = [0];
+            assert_eq!(client.read(&mut byte).unwrap(), 0);
+            let error = worker.join().unwrap().unwrap_err();
+            assert!(format!("{error:#}").contains("control"), "{error:#}");
+            assert_eq!(shared.requested_target(), None);
+        }
+    }
+
+    #[test]
+    fn fragmented_control_frame_is_reassembled() {
+        let shared = SharedControl::new(false);
+        let (mut client, worker) = connection_pair(shared);
+        let mut bytes = vec![];
+        Frame::CtlRequest {
+            json: Request::status().to_json().unwrap(),
+        }
+        .write_to(&mut bytes)
+        .unwrap();
+        for part in bytes.chunks(2) {
+            client.write_all(part).unwrap();
+        }
+        let Frame::CtlResponse { json } = Frame::read_from(&mut client).unwrap() else {
+            panic!("structured response missing");
+        };
+        assert_eq!(Response::from_json(&json).unwrap().code, "STATUS_OK");
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn legacy_status_frame_remains_supported() {
+        let (mut client, worker) = connection_pair(SharedControl::new(true));
+        Frame::CtlStatus.write_to(&mut client).unwrap();
+        assert!(
+            matches!(Frame::read_from(&mut client).unwrap(), Frame::CtlOk { msg } if msg == "running")
+        );
+        worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn legacy_migration_result_uses_event_not_misleading_message_prefix() {
+        let shared = SharedControl::new(true);
+        let (mut client, worker) = connection_pair(shared.clone());
+        Frame::CtlMigrate {
+            target: "localhost:9102".into(),
+        }
+        .write_to(&mut client)
+        .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while shared.requested_target().is_none() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(shared.requested_target().is_some());
+        shared.workload_finished(
+            Completion::CommitUncertain,
+            "migrated: deliberately misleading".into(),
+        );
+        assert!(matches!(
+            Frame::read_from(&mut client).unwrap(),
+            Frame::CtlErr { .. }
+        ));
+        worker.join().unwrap().unwrap();
+    }
 
     #[test]
     fn abort_before_commit_keeps_constructor_exports_dormant() {
@@ -508,6 +764,7 @@ mod tests {
 
         set_initial_read_timeout(&server).unwrap();
         assert_eq!(server.read_timeout().unwrap(), Some(INITIAL_FRAME_TIMEOUT));
+        assert_eq!(server.write_timeout().unwrap(), Some(INITIAL_FRAME_TIMEOUT));
         drop(client);
     }
 
@@ -534,7 +791,7 @@ mod tests {
         let message = migration_outcome_message(&stats);
         assert!(message.starts_with("commit uncertain:"));
         assert!(message.contains("source retired"));
-        assert!(!control_result_succeeded(&message));
+        assert!(!control_result_succeeded(migration_completion(&stats)));
         assert_eq!(migration_marker(&stats), "WEAVE_MIGRATED_UNCONFIRMED");
     }
 }

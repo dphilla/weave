@@ -29,6 +29,7 @@ import {
   TcpTransport,
 } from "./weave-node-transport.mjs";
 import { makeEmitServices } from "./weave-node-services.mjs";
+import { ControlState, builtinCapabilities, decodeRequest, encodeResponse } from "./weave-node-control.mjs";
 
 // ---------------------------------------------------------------- transport
 
@@ -39,7 +40,7 @@ function connect(addr) {
 
 function splitAddr(addr) {
   const i = addr.lastIndexOf(":");
-  return [addr.slice(0, i), Number(addr.slice(i + 1))];
+  return [addr.slice(0, i).replace(/^\[|\]$/g, ""), Number(addr.slice(i + 1))];
 }
 
 // ---------------------------------------------------------------- args
@@ -118,12 +119,15 @@ async function cmdServe(opts) {
   const shared = { lastResult: null };
   const admission = new TargetAdmission(opts.flags.has("module"));
   const outbound = new OutboundMigrationAdmission(() => admission.isRunning());
+  const control = new ControlState(builtinCapabilities(), opts.flags.has("module") ? "running" : "idle");
+  let activeInstance = null;
 
-  const completeOutbound = (request, message) => {
+  const completeOutbound = (request, completion, message) => {
     // Only the owner may publish a request outcome. This identity check keeps a
     // delayed failure from resolving or overwriting a later control request.
     if (request !== null && outbound.current() !== request) return false;
     shared.lastResult = message;
+    control.complete(completion, message);
     return request === null || outbound.complete(request, message);
   };
 
@@ -135,6 +139,8 @@ async function cmdServe(opts) {
   // requested; returns "migrated" | "done".
   async function driveWorkload(inst, entry, args) {
     admission.startRunning();
+    activeInstance = inst;
+    control.setLifecycle("running");
     let migration = null;
     let migrationRequest = null;
     try {
@@ -150,7 +156,7 @@ async function cmdServe(opts) {
             await migration.handshake();
             migrationRequest = request;
           } catch (e) {
-            completeOutbound(request, `migration failed to start: ${e.message}`);
+            completeOutbound(request, "failed_before_commit", `migration failed to start: ${e.message}`);
             closeMigration(migration);
             migration = null;
             migrationRequest = null;
@@ -161,7 +167,7 @@ async function cmdServe(opts) {
             const ready = await migration.precopyStep();
             if (ready) return "hold"; // stay unwound: state is checkpointed
           } catch (e) {
-            completeOutbound(migrationRequest, `migration failed: ${e.message}`);
+            completeOutbound(migrationRequest, "failed_before_commit", `migration failed: ${e.message}`);
             closeMigration(migration);
             migration = null;
             migrationRequest = null;
@@ -179,7 +185,7 @@ async function cmdServe(opts) {
         }
         const msg = `done: ${renderResults(res.results)}`;
         console.log(`WEAVE_DONE ${renderResults(res.results)}`);
-        completeOutbound(migrationRequest ?? outbound.current(), msg);
+        completeOutbound(migrationRequest ?? outbound.current(), "workload_completed", msg);
         return "done";
       }
       // held: guest is unwound with a converged pre-copy — go final.
@@ -191,19 +197,35 @@ async function cmdServe(opts) {
         : `commit uncertain: ${summary}; COMMIT_OK unconfirmed — source retired (${stats.commitError})`;
       console.error(`weave: ${msg}`);
       console.log(stats.commitConfirmed ? "WEAVE_MIGRATED" : "WEAVE_MIGRATED_UNCONFIRMED");
-      completeOutbound(migrationRequest, msg);
+      completeOutbound(migrationRequest, stats.commitConfirmed ? "migrated" : "commit_uncertain", msg);
       return "migrated";
     } catch (e) {
-      // migration failed after unwind: resume locally, seamlessly
-      completeOutbound(migrationRequest, `migration failed: ${e.message}`);
+      if (inst.lifecycle === "retired") {
+        completeOutbound(migrationRequest ?? outbound.current(), "commit_uncertain", `source retired: ${e.message}`);
+        closeMigration(migration);
+        return "migrated";
+      }
+      if (inst.lifecycle === "failed") {
+        completeOutbound(migrationRequest ?? outbound.current(), "workload_trapped", `trap: ${e.message}`);
+        closeMigration(migration);
+        console.error(`weave: workload trapped: ${e.message}`);
+        return "done";
+      }
+      // A failed final copy before PREPARED retains source execution authority.
+      completeOutbound(migrationRequest, "failed_before_commit", `migration failed: ${e.message}`);
       closeMigration(migration);
       console.error(`weave: migration failed (${e.message}), resuming locally`);
       const res = await inst.drive(null, null, async () => "continue");
       const msg = `done: ${renderResults(res.results)}`;
       console.log(`WEAVE_DONE ${renderResults(res.results)}`);
       shared.lastResult = msg;
+      control.complete("workload_completed", msg);
       return "done";
     } finally {
+      if (inst.lifecycle === "failed" && control.lifecycle !== "failed") {
+        completeOutbound(outbound.current(), "workload_trapped", "workload trapped while resuming");
+      }
+      activeInstance = null;
       admission.finishRunning();
     }
   }
@@ -235,6 +257,7 @@ async function cmdServe(opts) {
             return;
           }
           shared.lastResult = null;
+          control.setLifecycle("accepting");
           const { inst, sourceRuntime, commitAckError } = await acceptMigration(t, makeEmitServices, {
             runtimeName: "node",
             moduleCache,
@@ -263,6 +286,7 @@ async function cmdServe(opts) {
             return;
           }
           shared.lastResult = null;
+          control.setLifecycle("migrating");
           let timeout;
           const timeoutResult = new Promise((resolve) => {
             timeout = setTimeout(() => resolve("timeout"), 120000);
@@ -277,11 +301,32 @@ async function cmdServe(opts) {
           const msg = shared.lastResult ?? admission.status();
           await t.write(frame(FT.CTL_OK, new Writer().str(msg).out()));
           sock.end();
+      } else if (first === FT.CTL_REQUEST) {
+          const f = await readFrame(t);
+          if (activeInstance?.lifecycle === "retired") control.sourceRetired();
+          let response;
+          try {
+            const result = control.handle(decodeRequest(f.payload), admission.isRunning() && outbound.current() === null);
+            response = result.response;
+            if (result.accepted) {
+              // No await between the ledger and execution reservation.
+              const attempt = outbound.tryReserve(result.accepted.target);
+              if (!attempt.ok) throw new Error(`control admission invariant: ${attempt.error}`);
+              shared.lastResult = null;
+            }
+          } catch (error) {
+            response = control.invalidRequest(error.message);
+          }
+          await t.write(frame(FT.CTL_RESPONSE, encodeResponse(response)));
+          sock.end();
       } else {
         sock.end();
       }
     } catch (e) {
-      if (incomingReservation !== null) admission.release(incomingReservation);
+      if (incomingReservation !== null) {
+        admission.release(incomingReservation);
+        control.setLifecycle("idle");
+      }
       console.error(`weave: connection error: ${e.message}`);
       // A receive timeout leaves readExact pending; fully destroy the socket
       // so the stalled peer cannot retain this connection or admission slot.

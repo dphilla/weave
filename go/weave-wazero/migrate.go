@@ -177,6 +177,7 @@ type sourceMigration struct {
 	totalPages int
 	opts       sourceOpts
 	converged  bool
+	onPrepared func() // internal node control notification at irreversible retirement
 }
 
 func (s *sourceMigration) abort(code uint32, message string) {
@@ -433,6 +434,9 @@ func (s *sourceMigration) finish() (migrationStats, error) {
 
 	// PREPARED is irreversible for the source. Any error below is an
 	// unconfirmed commit, never permission to resume the local instance.
+	if s.onPrepared != nil {
+		s.onPrepared()
+	}
 	stats := migrationStats{
 		rounds:     s.rounds,
 		totalPages: s.totalPages,

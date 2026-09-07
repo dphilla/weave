@@ -18,7 +18,8 @@ use weave_core::wire::{Frame, MODULE_CHUNK, PROTO_VERSION, ROLE_SOURCE, ROLE_TAR
 use weave_core::{Meta, WASM_PAGE_SIZE, WPAGE_SIZE};
 
 const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_MODULE_SIZE: u64 = 512 * 1024 * 1024;
+/// Enforced maximum module transfer size, also advertised by node control.
+pub const MAX_MODULE_SIZE: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_MAX_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Engine hooks the session drives. `instantiate` must NOT call

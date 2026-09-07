@@ -28,6 +28,8 @@ use std::io::{Read, Write};
 pub const PROTO_VERSION: u8 = 2;
 /// Hard cap on a single frame payload (module chunks are far smaller).
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// Structured control is intentionally much smaller than migration data.
+pub const MAX_CONTROL_FRAME: usize = 64 * 1024;
 /// Module transfer chunk size.
 pub const MODULE_CHUNK: usize = 256 * 1024;
 
@@ -95,6 +97,14 @@ pub enum Frame {
     Commit,
     /// Target observed `Commit` and now owns the workload.
     CommitOk,
+    /// Optional versioned control request, raw UTF-8 JSON (not a wire string).
+    CtlRequest {
+        json: Vec<u8>,
+    },
+    /// Optional versioned control response, raw UTF-8 JSON.
+    CtlResponse {
+        json: Vec<u8>,
+    },
 }
 
 pub const ROLE_SOURCE: u8 = 1;
@@ -126,6 +136,8 @@ impl Frame {
             Frame::CtlErr { .. } => 20,
             Frame::Commit => 21,
             Frame::CommitOk => 22,
+            Frame::CtlRequest { .. } => 23,
+            Frame::CtlResponse { .. } => 24,
         }
     }
 
@@ -139,6 +151,11 @@ impl Frame {
             }
             Frame::Services { services } if services.len() > u16::MAX as usize => {
                 bail!("too many host services for SERVICES")
+            }
+            Frame::CtlRequest { json } | Frame::CtlResponse { json }
+                if json.len() > MAX_CONTROL_FRAME =>
+            {
+                bail!("control frame payload too large: {}", json.len())
             }
             _ => {}
         }
@@ -208,6 +225,7 @@ impl Frame {
             }
             Frame::CtlMigrate { target } => put_str(&mut p, target),
             Frame::CtlOk { msg } | Frame::CtlErr { msg } => put_str(&mut p, msg),
+            Frame::CtlRequest { json } | Frame::CtlResponse { json } => p.extend_from_slice(json),
             Frame::ModuleNeed
             | Frame::ModuleHave
             | Frame::ModuleOk
@@ -240,6 +258,9 @@ impl Frame {
         r.read_exact(&mut hdr).context("reading frame header")?;
         let ty = hdr[0];
         let len = u32::from_le_bytes(hdr[1..5].try_into().unwrap()) as usize;
+        if matches!(ty, 23 | 24) && len > MAX_CONTROL_FRAME {
+            bail!("control frame too large: {len}");
+        }
         if len > MAX_FRAME {
             bail!("frame too large: {len}");
         }
@@ -349,6 +370,8 @@ impl Frame {
             },
             21 => Frame::Commit,
             22 => Frame::CommitOk,
+            23 => return Ok(Frame::CtlRequest { json: buf }),
+            24 => return Ok(Frame::CtlResponse { json: buf }),
             _ => bail!("unknown frame type {ty}"),
         };
         if pos != buf.len() {
@@ -416,6 +439,12 @@ mod tests {
             Frame::CtlErr { msg: "err".into() },
             Frame::Commit,
             Frame::CommitOk,
+            Frame::CtlRequest {
+                json: br#"{"schema_version":1,"action":"status"}"#.to_vec(),
+            },
+            Frame::CtlResponse {
+                json: br#"{"schema_version":1,"ok":true}"#.to_vec(),
+            },
         ];
         let mut buf = Vec::new();
         for f in &frames {
@@ -439,5 +468,32 @@ mod tests {
             pages: vec![0; u8::MAX as usize + 1],
         };
         assert!(frame.payload().is_err());
+    }
+
+    #[test]
+    fn control_frame_bounds_are_checked_before_reading_payload() {
+        for ty in [23, 24] {
+            let mut header = vec![ty];
+            header.extend_from_slice(&((MAX_CONTROL_FRAME + 1) as u32).to_le_bytes());
+            // No payload supplied: this must fail on the advertised bound, not EOF.
+            let error = Frame::read_from(&mut &header[..]).unwrap_err();
+            assert!(error.to_string().contains("control frame too large"));
+        }
+        for frame in [
+            Frame::CtlRequest {
+                json: vec![0; MAX_CONTROL_FRAME + 1],
+            },
+            Frame::CtlResponse {
+                json: vec![0; MAX_CONTROL_FRAME + 1],
+            },
+        ] {
+            assert!(frame.payload().is_err());
+        }
+        let frame = Frame::CtlRequest {
+            json: vec![b' '; MAX_CONTROL_FRAME],
+        };
+        let mut bytes = Vec::new();
+        frame.write_to(&mut bytes).unwrap();
+        assert_eq!(Frame::read_from(&mut &bytes[..]).unwrap(), frame);
     }
 }

@@ -480,28 +480,30 @@ func extractMeta(wasm []byte) (*Meta, []byte, error) {
 // ------------------------------------------------------------------ wire
 
 const (
-	FtHello      = 1
-	FtModuleMeta = 2
-	FtModuleNeed = 3
-	FtModuleHave = 4
-	FtModuleData = 5
-	FtModuleOk   = 6
-	FtMemLayout  = 7
-	FtPage       = 8
-	FtRoundEnd   = 9
-	FtRoundAck   = 10
-	FtFinalBegin = 11
-	FtGlobals    = 12
-	FtServices   = 13
-	FtFinalEnd   = 14
-	FtPrepared   = 15
-	FtAbort      = 16
-	FtCtlMigrate = 17
-	FtCtlStatus  = 18
-	FtCtlOk      = 19
-	FtCtlErr     = 20
-	FtCommit     = 21
-	FtCommitOk   = 22
+	FtHello       = 1
+	FtModuleMeta  = 2
+	FtModuleNeed  = 3
+	FtModuleHave  = 4
+	FtModuleData  = 5
+	FtModuleOk    = 6
+	FtMemLayout   = 7
+	FtPage        = 8
+	FtRoundEnd    = 9
+	FtRoundAck    = 10
+	FtFinalBegin  = 11
+	FtGlobals     = 12
+	FtServices    = 13
+	FtFinalEnd    = 14
+	FtPrepared    = 15
+	FtAbort       = 16
+	FtCtlMigrate  = 17
+	FtCtlStatus   = 18
+	FtCtlOk       = 19
+	FtCtlErr      = 20
+	FtCommit      = 21
+	FtCommitOk    = 22
+	FtCtlRequest  = 23
+	FtCtlResponse = 24
 )
 
 type frame struct {
@@ -510,6 +512,9 @@ type frame struct {
 }
 
 func writeFrame(w *bufio.Writer, typ byte, payload []byte) error {
+	if (typ == FtCtlRequest || typ == FtCtlResponse) && len(payload) > maxControlFrame {
+		return fmt.Errorf("control frame payload too large: %d", len(payload))
+	}
 	if len(payload) > 64<<20 {
 		return fmt.Errorf("frame payload too large: %d", len(payload))
 	}
@@ -529,6 +534,9 @@ func readFrameR(r *bufio.Reader) (frame, error) {
 		return frame{}, err
 	}
 	n := binary.LittleEndian.Uint32(hdr[1:])
+	if (hdr[0] == FtCtlRequest || hdr[0] == FtCtlResponse) && n > maxControlFrame {
+		return frame{}, fmt.Errorf("control frame too large: %d", n)
+	}
 	if n > 64<<20 {
 		return frame{}, fmt.Errorf("frame too large: %d", n)
 	}

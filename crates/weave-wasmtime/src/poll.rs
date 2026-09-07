@@ -8,6 +8,7 @@
 
 use crate::instance::Ctx;
 use wasmtime::{Caller, Linker, Memory};
+use weave_core::control::Completion;
 use weave_host::source::SourceMigration;
 use weave_host::MemRead;
 
@@ -113,7 +114,10 @@ pub fn install_poll(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
                         // Can't reach the target: keep running, report, clear.
                         if let Some(sh) = &caller.data().shared {
                             let mut sh = sh.lock().unwrap();
-                            sh.complete_request(format!("migration failed to start: {e:#}"));
+                            sh.complete_request(
+                                Completion::FailedBeforeCommit,
+                                format!("migration failed to start: {e:#}"),
+                            );
                         }
                     }
                 }

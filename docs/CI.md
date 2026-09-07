@@ -89,6 +89,12 @@ and a deliberately stateful reference service. Those fixtures and their matrix
 belong under `.github/ci`, invoked through `host-service-baseline.sh`;
 runtime-specific workflow fragments should not be added beside product source.
 
+The baseline also runs the public Rust lifecycle regressions and transforms
+`js/test-support/lifecycle.wat` with the current compiler before repeating the
+JavaScript lifecycle/ownership tests. This complements the recorded genuine
+Wasm fixture used by the Rust-free JavaScript lane. See [`LIBRARY.md`](LIBRARY.md)
+for the guarded API, cancellation, and restore contract.
+
 ## Artifacts and replay
 
 Conformance and browser jobs upload their complete artifact directories even

@@ -130,6 +130,9 @@ gateway path. The
 cross-runtime native walkthrough.
 For the required and scheduled verification topology, local replay commands,
 and artifact policy, see [`docs/CI.md`](docs/CI.md).
+For direct JavaScript or Rust embedding, see the
+[`safe library lifecycle guide`](docs/LIBRARY.md): guarded execution,
+cooperative cancellation, checkpoint/restore, and migration ownership rules.
 
 ## Quickstart
 

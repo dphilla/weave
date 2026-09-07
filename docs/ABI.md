@@ -118,6 +118,11 @@ byte-compatible. Built-ins (implemented identically in Rust/JS/Go runners):
 
 ## Contracts
 
+The JavaScript and Wasmtime public instance APIs enforce execution and restore
+lifecycle guards over these raw ABI rules. Their cancellation behavior,
+checkpoint APIs, and low-level escape-hatch boundaries are documented in
+[`LIBRARY.md`](LIBRARY.md).
+
 - Single-threaded guest; one entry call in flight at a time.
 - Hosts must not request an unwind from a reentrant host→guest call.
 - Don't call entries while an unwound checkpoint is pending (resume it first).

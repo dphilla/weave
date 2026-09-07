@@ -45,4 +45,5 @@ WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/browser-sidecar" \
   .github/ci/browser-sidecar-smoke.sh
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/adversity" \
   .github/ci/adversity.sh all
-.github/ci/host-service-baseline.sh 2>&1 | tee "$ARTIFACT_ROOT/host-service-baseline.log"
+WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/host-service-baseline" \
+  .github/ci/host-service-baseline.sh 2>&1 | tee "$ARTIFACT_ROOT/host-service-baseline.log"

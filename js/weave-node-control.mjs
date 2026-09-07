@@ -4,7 +4,9 @@ import { randomBytes } from "node:crypto";
 import { isIP } from "node:net";
 
 export const MAX_CONTROL_FRAME = 65536;
-const utf8 = new TextDecoder("utf-8", { fatal: true });
+// Preserve a leading BOM: JSON does not permit it outside a string, and valid
+// strings containing U+FEFF must not be altered by decoding.
+const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const encoder = new TextEncoder();
 const keys = new Set(["schema_version", "action", "node_epoch", "operation_id", "target"]);
 
@@ -67,7 +69,7 @@ function boundedMessage(message) {
 }
 
 export function validTarget(target) {
-  if (typeof target !== "string" || encoder.encode(target).length > 4096 || /[\s\x00-\x1f\x7f]/u.test(target)) return false;
+  if (typeof target !== "string" || encoder.encode(target).length > 4096 || /[\s\x00-\x1f\x7f-\x9f]/u.test(target)) return false;
   const index = target.lastIndexOf(":");
   const port = target.slice(index + 1);
   const host = target.slice(0, index);

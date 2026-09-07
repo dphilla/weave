@@ -20,6 +20,8 @@ test("control request decoding is strict, Unicode-valid and versioned", () => {
     assert.throws(() => decodeRequest(bytes(value)), undefined, value);
   }
   assert.throws(() => decodeRequest(new Uint8Array([255])));
+  assert.throws(() => decodeRequest(bytes('\ufeff{"schema_version":1,"action":"status"}')));
+  assert.equal(decodeRequest(bytes('{"schema_version":1,"action":"operation","node_epoch":"\ufeffepoch","operation_id":"one"}')).node_epoch, "\ufeffepoch");
   assert.throws(() => decodeRequest(new Uint8Array(65537)));
   const s = state();
   assert.equal(s.handle(decodeRequest(bytes('{"schema_version":2,"action":"status"}')), true).response.code, "UNSUPPORTED_SCHEMA");

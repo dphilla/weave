@@ -114,6 +114,13 @@ async function cmdServe(opts) {
     maxRounds: Number(opts.flags.get("max-rounds") ?? 10),
     dirtyPageThreshold: Number(opts.flags.get("dirty-threshold") ?? 64),
   };
+  for (const [flag, value] of [["budget", sourceOpts.budgetBytes], ["max-rounds", sourceOpts.maxRounds]]) {
+    if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`--${flag} must be a positive safe integer`);
+  }
+  if (!Number.isSafeInteger(sourceOpts.dirtyPageThreshold) || sourceOpts.dirtyPageThreshold < 0) {
+    throw new RangeError("--dirty-threshold must be a non-negative safe integer");
+  }
+  if (!Number.isFinite(yieldMs) || yieldMs < 0) throw new RangeError("--yield-ms must be a finite non-negative number");
   const moduleCache = new Map();
 
   const shared = { lastResult: null };
@@ -131,9 +138,10 @@ async function cmdServe(opts) {
     return request === null || outbound.complete(request, message);
   };
 
-  const closeMigration = (migration) => {
-    try { migration?.t.close?.(); } catch { /* best-effort transport cleanup */ }
+  const closeTransport = (transport) => {
+    try { transport?.close?.(); } catch { /* best-effort transport cleanup */ }
   };
+  const closeMigration = (migration) => closeTransport(migration?.t);
 
   // Workload driver: runs inst cooperatively; carries out migration when
   // requested; returns "migrated" | "done".
@@ -141,86 +149,89 @@ async function cmdServe(opts) {
     admission.startRunning();
     activeInstance = inst;
     control.setLifecycle("running");
-    let migration = null;
-    let migrationRequest = null;
     try {
-      const res = await inst.drive(entry, args, async () => {
-        // At every unwind-yield: let the event loop breathe so ctl/data
-        // connections are serviced.
-        await new Promise((r) => setImmediate(r));
-        if (migration === null && outbound.current() !== null) {
-          const request = outbound.current();
-          try {
-            const t = await connect(request.target);
-            migration = new SourceMigration(t, inst, "node", sourceOpts);
-            await migration.handshake();
-            migrationRequest = request;
-          } catch (e) {
-            completeOutbound(request, "failed_before_commit", `migration failed to start: ${e.message}`);
-            closeMigration(migration);
-            migration = null;
-            migrationRequest = null;
+      for (;;) {
+        let migration = null;
+        let migrationRequest = null;
+        try {
+          const res = await inst.drive(entry, args, async () => {
+            // At every unwind-yield: let the event loop breathe so ctl/data
+            // connections are serviced.
+            await new Promise((r) => setImmediate(r));
+            if (migration === null && outbound.current() !== null) {
+              const request = outbound.current();
+              let transport = null;
+              try {
+                transport = await connect(request.target);
+                migration = new SourceMigration(transport, inst, "node", sourceOpts);
+                await migration.handshake();
+                migrationRequest = request;
+              } catch (e) {
+                completeOutbound(request, "failed_before_commit", `migration failed to start: ${e.message}`);
+                closeTransport(transport);
+                migration = null;
+                migrationRequest = null;
+              }
+            }
+            if (migration) {
+              try {
+                const ready = await migration.precopyStep();
+                if (ready) return "hold"; // stay unwound: state is checkpointed
+              } catch (e) {
+                completeOutbound(migrationRequest, "failed_before_commit", `migration failed: ${e.message}`);
+                closeMigration(migration);
+                migration = null;
+                migrationRequest = null;
+              }
+            }
+            return "continue";
+          });
+          if (res.status === "done") {
+            if (migration) {
+              // finished before checkpoint: abort the transfer
+              try {
+                await migration.t.write(frame(FT.ABORT, new Writer().u32(10).str("completed before checkpoint").out()));
+              } catch {}
+              closeMigration(migration);
+            }
+            const msg = `done: ${renderResults(res.results)}`;
+            console.log(`WEAVE_DONE ${renderResults(res.results)}`);
+            completeOutbound(migrationRequest ?? outbound.current(), "workload_completed", msg);
+            return "done";
           }
-        }
-        if (migration) {
-          try {
-            const ready = await migration.precopyStep();
-            if (ready) return "hold"; // stay unwound: state is checkpointed
-          } catch (e) {
-            completeOutbound(migrationRequest, "failed_before_commit", `migration failed: ${e.message}`);
-            closeMigration(migration);
-            migration = null;
-            migrationRequest = null;
-          }
-        }
-        return "continue";
-      });
-      if (res.status === "done") {
-        if (migration) {
-          // finished before checkpoint: abort the transfer
-          try {
-            await migration.t.write(frame(FT.ABORT, new Writer().u32(10).str("completed before checkpoint").out()));
-          } catch {}
+          // held: guest is unwound with a converged pre-copy — go final.
+          const stats = await migration.finish();
           closeMigration(migration);
+          const summary = `${stats.rounds} rounds, ${stats.totalPages} pages total, ${stats.finalPages} in pause window`;
+          const msg = stats.commitConfirmed
+            ? `migrated: ${summary}`
+            : `commit uncertain: ${summary}; COMMIT_OK unconfirmed — source retired (${stats.commitError})`;
+          console.error(`weave: ${msg}`);
+          console.log(stats.commitConfirmed ? "WEAVE_MIGRATED" : "WEAVE_MIGRATED_UNCONFIRMED");
+          completeOutbound(migrationRequest, stats.commitConfirmed ? "migrated" : "commit_uncertain", msg);
+          return "migrated";
+        } catch (e) {
+          if (inst.lifecycle === "retired") {
+            completeOutbound(migrationRequest ?? outbound.current(), "commit_uncertain", `source retired: ${e.message}`);
+            closeMigration(migration);
+            return "migrated";
+          }
+          if (inst.lifecycle === "failed") {
+            completeOutbound(migrationRequest ?? outbound.current(), "workload_trapped", `trap: ${e.message}`);
+            closeMigration(migration);
+            console.error(`weave: workload trapped: ${e.message}`);
+            return "done";
+          }
+          // A failed final copy before PREPARED retains source execution authority.
+          completeOutbound(migrationRequest, "failed_before_commit", `migration failed: ${e.message}`);
+          closeMigration(migration);
+          console.error(`weave: migration failed (${e.message}), resuming locally`);
+          // Resume through the full driver, including control admission. A new
+          // operation must remain actionable after a rollback-safe failure.
+          entry = null;
+          args = null;
         }
-        const msg = `done: ${renderResults(res.results)}`;
-        console.log(`WEAVE_DONE ${renderResults(res.results)}`);
-        completeOutbound(migrationRequest ?? outbound.current(), "workload_completed", msg);
-        return "done";
       }
-      // held: guest is unwound with a converged pre-copy — go final.
-      const stats = await migration.finish();
-      closeMigration(migration);
-      const summary = `${stats.rounds} rounds, ${stats.totalPages} pages total, ${stats.finalPages} in pause window`;
-      const msg = stats.commitConfirmed
-        ? `migrated: ${summary}`
-        : `commit uncertain: ${summary}; COMMIT_OK unconfirmed — source retired (${stats.commitError})`;
-      console.error(`weave: ${msg}`);
-      console.log(stats.commitConfirmed ? "WEAVE_MIGRATED" : "WEAVE_MIGRATED_UNCONFIRMED");
-      completeOutbound(migrationRequest, stats.commitConfirmed ? "migrated" : "commit_uncertain", msg);
-      return "migrated";
-    } catch (e) {
-      if (inst.lifecycle === "retired") {
-        completeOutbound(migrationRequest ?? outbound.current(), "commit_uncertain", `source retired: ${e.message}`);
-        closeMigration(migration);
-        return "migrated";
-      }
-      if (inst.lifecycle === "failed") {
-        completeOutbound(migrationRequest ?? outbound.current(), "workload_trapped", `trap: ${e.message}`);
-        closeMigration(migration);
-        console.error(`weave: workload trapped: ${e.message}`);
-        return "done";
-      }
-      // A failed final copy before PREPARED retains source execution authority.
-      completeOutbound(migrationRequest, "failed_before_commit", `migration failed: ${e.message}`);
-      closeMigration(migration);
-      console.error(`weave: migration failed (${e.message}), resuming locally`);
-      const res = await inst.drive(null, null, async () => "continue");
-      const msg = `done: ${renderResults(res.results)}`;
-      console.log(`WEAVE_DONE ${renderResults(res.results)}`);
-      shared.lastResult = msg;
-      control.complete("workload_completed", msg);
-      return "done";
     } finally {
       if (inst.lifecycle === "failed" && control.lifecycle !== "failed") {
         completeOutbound(outbound.current(), "workload_trapped", "workload trapped while resuming");

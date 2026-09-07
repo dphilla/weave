@@ -40,7 +40,9 @@ func TestControlRequestStrictJSON(t *testing.T) {
 		`{"schema_version":1.0,"action":"status"}`, `{"schema_version":1e0,"action":"status"}`,
 		`{"schema_version":null,"action":"status"}`, `{"schema_version":1,"action":"other"}`,
 		`{"schema_version":1,"action":"status","target":{}}`,
-		`{"schema_version":1,"action":"status"} {}`, string([]byte{255}), strings.Repeat(" ", 65537)} {
+		`{"schema_version":1,"action":"status","target":"\ud800"}`,
+		`{"schema_version":1,"action":"status","target":"\udc00"}`,
+		`{"schema_version":1,"action":"status"} {}`, "\ufeff{\"schema_version\":1,\"action\":\"status\"}", string([]byte{255}), strings.Repeat(" ", 65537)} {
 		if _, err := decodeControlRequest([]byte(input)); err == nil {
 			t.Errorf("accepted invalid JSON %q", input)
 		}
@@ -53,6 +55,11 @@ func TestControlRequestStrictJSON(t *testing.T) {
 	result, _ := s.handle(r, true)
 	if result.Code != "UNSUPPORTED_SCHEMA" {
 		t.Fatal(result)
+	}
+	for _, input := range []string{`{"schema_version":1,"action":"status","target":"\ud83d\ude00"}`, `{"schema_version":1,"action":"status","target":"\\ud800"}`} {
+		if _, err := decodeControlRequest([]byte(input)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -304,5 +311,43 @@ func TestControlAcceptedOperationSurvivesLostResponse(t *testing.T) {
 	sh.mu.Unlock()
 	if count != 1 {
 		t.Fatal("lost reply caused duplicate execution")
+	}
+}
+
+func TestControlPreparedCallbackPublishesRetirementBeforeCommit(t *testing.T) {
+	sh := &shared{active: true, control: testControl(t)}
+	sh.control.handle(testControlRequest("one"), true)
+	source, peer := net.Pipe()
+	defer source.Close()
+	observed := make(chan controlResponse, 1)
+	go func() {
+		defer peer.Close()
+		frame, err := readFrameR(bufio.NewReader(peer))
+		if err != nil || frame.typ != FtCommit {
+			t.Errorf("expected COMMIT: %v, %v", frame, err)
+		}
+		sh.mu.Lock()
+		response, _ := sh.control.handle(testControlLookup("one"), false)
+		sh.mu.Unlock()
+		observed <- response
+		// Deliberately drop COMMIT_OK after observing the source retirement.
+	}()
+	migration := &sourceMigration{r: bufio.NewReader(source), w: bufio.NewWriter(source), conn: source,
+		onPrepared: func() { sh.mu.Lock(); sh.control.sourceRetired(); sh.mu.Unlock() },
+	}
+	stats := migration.commitPrepared(migrationStats{rounds: 1})
+	if stats.commitConfirmed {
+		t.Fatal("lost COMMIT_OK was confirmed")
+	}
+	response := <-observed
+	if response.Code != "COMMIT_PENDING" || response.Ownership != "retired" || response.Operation.Ownership != "retired" {
+		t.Fatal(response)
+	}
+	sh.mu.Lock()
+	sh.control.complete(controlCommitUncertain, stats.commitError)
+	sh.mu.Unlock()
+	lookup, _ := json.Marshal(testControlLookup("one"))
+	if final := controlExchange(t, sh, lookup); final.Code != "COMMIT_UNCERTAIN" || final.Ownership != "retired" {
+		t.Fatal(final)
 	}
 }

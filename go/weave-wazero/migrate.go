@@ -434,9 +434,6 @@ func (s *sourceMigration) finish() (migrationStats, error) {
 
 	// PREPARED is irreversible for the source. Any error below is an
 	// unconfirmed commit, never permission to resume the local instance.
-	if s.onPrepared != nil {
-		s.onPrepared()
-	}
 	stats := migrationStats{
 		rounds:     s.rounds,
 		totalPages: s.totalPages,
@@ -446,6 +443,9 @@ func (s *sourceMigration) finish() (migrationStats, error) {
 }
 
 func (s *sourceMigration) commitPrepared(stats migrationStats) migrationStats {
+	if s.onPrepared != nil {
+		s.onPrepared()
+	}
 	_ = s.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 	if err := writeFrame(s.w, FtCommit, nil); err != nil {
 		stats.commitError = fmt.Sprintf("sending COMMIT failed: %v", err)

@@ -30,6 +30,9 @@ func decodeControlRequest(payload []byte) (controlRequest, error) {
 	if len(payload) > maxControlFrame || !utf8.Valid(payload) {
 		return request, fmt.Errorf("invalid control request size or UTF-8")
 	}
+	if !validControlJSONSurrogates(payload) {
+		return request, fmt.Errorf("invalid Unicode surrogate in request")
+	}
 	d := json.NewDecoder(bytes.NewReader(payload))
 	token, err := d.Token()
 	if err != nil || token != json.Delim('{') {
@@ -81,6 +84,51 @@ func decodeControlRequest(payload []byte) (controlRequest, error) {
 		return request, fmt.Errorf("missing schema_version or invalid action")
 	}
 	return request, nil
+}
+
+// encoding/json replaces unpaired surrogate escapes, whereas the common
+// schema requires their rejection (matching Rust and Node).
+func validControlJSONSurrogates(payload []byte) bool {
+	inString := false
+	for i := 0; i < len(payload); i++ {
+		if payload[i] == '"' {
+			inString = !inString
+			continue
+		}
+		if !inString || payload[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(payload) {
+			return false
+		}
+		if payload[i] != 'u' {
+			continue
+		}
+		if i+4 >= len(payload) {
+			return false
+		}
+		value, err := strconv.ParseUint(string(payload[i+1:i+5]), 16, 16)
+		if err != nil {
+			return false
+		}
+		i += 4
+		if value >= 0xdc00 && value <= 0xdfff {
+			return false
+		}
+		if value < 0xd800 || value > 0xdbff {
+			continue
+		}
+		if i+6 >= len(payload) || payload[i+1] != '\\' || payload[i+2] != 'u' {
+			return false
+		}
+		low, err := strconv.ParseUint(string(payload[i+3:i+7]), 16, 16)
+		if err != nil || low < 0xdc00 || low > 0xdfff {
+			return false
+		}
+		i += 6
+	}
+	return true
 }
 
 type controlOperation struct {

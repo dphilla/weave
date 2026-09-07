@@ -58,6 +58,20 @@ impl MemRead for SliceMem<'_> {
 /// Install `weave.poll` into a linker.
 pub fn install_poll(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
     linker.func_wrap("weave", "poll", |mut caller: Caller<'_, Ctx>| -> i32 {
+        // Init has no suspended entry that resume could reconstruct, even if
+        // an original start import installs an unwind poller through Ctx.
+        if caller.data().initializing {
+            return 0;
+        }
+        if caller.data().cancellation.take() {
+            // No PREPARED can occur inside precopy. Dropping the connection
+            // safely cancels staging while the source unwinds for its caller.
+            if matches!(caller.data().poller, Poller::Migrating { .. }) {
+                caller.data_mut().poller =
+                    Poller::Errored("execution cancelled before handoff".into());
+            }
+            return 1;
+        }
         // Move the control state out so we can also borrow memory immutably.
         let mut poller = std::mem::take(&mut caller.data_mut().poller);
         let mut counters_hit = false;
@@ -88,7 +102,8 @@ pub fn install_poll(linker: &mut Linker<Ctx>) -> anyhow::Result<()> {
                     mem_names.len(),
                     opts,
                 ) {
-                    Ok(mig) => {
+                    Ok(mut mig) => {
+                        mig.attach_retirement_flag(caller.data().retired.clone());
                         poller = Poller::Migrating {
                             mig: Box::new(mig),
                             mem_names,

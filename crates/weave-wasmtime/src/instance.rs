@@ -6,6 +6,8 @@ use crate::WeaveModule;
 use anyhow::{anyhow, bail, Context, Result};
 use std::any::Any;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use wasmtime::{Engine, Extern, Instance, Linker, Memory, Module, Store, Val};
 use weave_core::names;
 use weave_core::snapshot::Snapshot;
@@ -25,6 +27,9 @@ pub struct Ctx {
     pub module_wasm: std::sync::Arc<Vec<u8>>,
     pub meta_bytes: Vec<u8>,
     pub mem_names: Vec<String>,
+    pub(crate) retired: Arc<AtomicBool>,
+    pub(crate) cancellation: CancellationHandle,
+    pub(crate) initializing: bool,
 }
 
 impl Ctx {
@@ -40,8 +45,47 @@ impl Ctx {
 pub enum WorkResult {
     /// Ran to completion with these results.
     Done(Vec<Val>),
-    /// The guest unwound its stack (checkpoint/migration requested).
+    /// The guest unwound its stack (checkpoint, migration, or cancellation).
     Unwound,
+}
+
+/// Host-side lifecycle, independent of guest-writable control globals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceState {
+    /// Fresh initialization completed; an entry can be called.
+    Ready,
+    /// Uninitialized, unused destination awaiting a snapshot or wire state.
+    RestoreTarget,
+    /// Restore has begun, but execution is not yet authorized.
+    Restoring,
+    Running,
+    /// A complete suspended entry is available for checkpoint or resume.
+    Paused,
+    /// An entry completed; another entry may be called.
+    Completed,
+    /// Ownership transferred, including an unconfirmed COMMIT. Never runnable.
+    Retired,
+    /// Guest execution or a mutating restore failed. Discard this instance.
+    Failed,
+}
+
+/// Thread-safe, one-shot cooperative cancellation of guest execution.
+///
+/// Cancellation requests a checkpoint unwind at the next instrumented poll,
+/// returning [`WorkResult::Unwound`]. It does not roll back host effects or
+/// interrupt a blocking host import/network call. Once paused, the caller may
+/// checkpoint, drop the instance, or resume it; each observed request is consumed.
+#[derive(Clone, Default)]
+pub struct CancellationHandle(Arc<AtomicBool>);
+
+impl CancellationHandle {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take(&self) -> bool {
+        self.0.swap(false, Ordering::AcqRel)
+    }
 }
 
 /// A callback that installs the workload's non-weave host imports.
@@ -58,6 +102,7 @@ pub struct WeaveInstance {
     store: Store<Ctx>,
     instance: Instance,
     engine: Engine,
+    state: InstanceState,
 }
 
 impl WeaveInstance {
@@ -77,6 +122,8 @@ impl WeaveInstance {
             .ok_or_else(|| anyhow!("module missing {}", names::F_INIT))?;
         init.call(&mut inst.store, &[], &mut [])
             .context("running __weave_init")?;
+        inst.store.data_mut().initializing = false;
+        inst.state = InstanceState::Ready;
         Ok(inst)
     }
 
@@ -98,6 +145,7 @@ impl WeaveInstance {
             let memory = inst.memory(&name)?;
             memory.data_mut(&mut inst.store).fill(0);
         }
+        inst.store.data_mut().initializing = false;
         Ok(inst)
     }
 
@@ -108,6 +156,15 @@ impl WeaveInstance {
         service_any: Vec<Box<dyn Any + Send>>,
         link: &mut LinkFn,
     ) -> Result<WeaveInstance> {
+        let mut service_names = HashSet::new();
+        for service in &services {
+            if service.name().is_empty() {
+                bail!("registered host-service name must not be empty");
+            }
+            if !service_names.insert(service.name()) {
+                bail!("duplicate registered host-service name: {}", service.name());
+            }
+        }
         let wmod = Module::new(engine, &module.wasm[..]).context("compiling woven module")?;
         validate_module_abi(&wmod, &module.wasm, &module.meta)
             .context("validating woven module ABI")?;
@@ -124,6 +181,9 @@ impl WeaveInstance {
             module_wasm: module.wasm.clone(),
             meta_bytes: module.meta.encode(),
             mem_names: module.meta.memories.clone(),
+            retired: Arc::new(AtomicBool::new(false)),
+            cancellation: CancellationHandle::default(),
+            initializing: true,
         };
         let mut store = Store::new(engine, ctx);
         let instance = linker
@@ -134,6 +194,7 @@ impl WeaveInstance {
             store,
             instance,
             engine: engine.clone(),
+            state: InstanceState::RestoreTarget,
         })
     }
 
@@ -149,12 +210,68 @@ impl WeaveInstance {
         d.source_opts = opts;
     }
 
+    /// Low-level host context access. Changing poll/service wiring bypasses
+    /// normal embedding contracts; prefer `set_poller` and stable service sets.
     pub fn ctx_mut(&mut self) -> &mut Ctx {
         self.store.data_mut()
     }
 
-    pub fn set_poller(&mut self, p: Poller) {
+    /// Configure the next execution's polling behavior. This cannot reset a
+    /// retired/failed lifecycle. Migration pollers inherit the ownership latch.
+    pub fn set_poller(&mut self, mut p: Poller) {
+        if let Poller::Migrating { mig, .. } = &mut p {
+            mig.attach_retirement_flag(self.store.data().retired.clone());
+        }
         self.store.data_mut().poller = p;
+    }
+
+    pub fn state(&self) -> InstanceState {
+        if self.store.data().retired.load(Ordering::Acquire) {
+            InstanceState::Retired
+        } else {
+            self.state
+        }
+    }
+
+    /// Obtain an instance-wide request handle suitable for another thread.
+    /// Requests persist until a poll observes them; a bounded leaf with no poll
+    /// can complete first. Cancellation never revives a retired instance.
+    pub fn cancellation_handle(&self) -> CancellationHandle {
+        self.store.data().cancellation.clone()
+    }
+
+    fn require_state(&self, operation: &str, allowed: &[InstanceState]) -> Result<()> {
+        let state = self.state();
+        if !allowed.contains(&state) {
+            bail!("cannot {operation} while instance is {state:?}; expected {allowed:?}");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_entry_call(&mut self, entry: &str, args: &[Val]) -> Result<()> {
+        self.require_state(
+            "call entry",
+            &[InstanceState::Ready, InstanceState::Completed],
+        )?;
+        self.n_results(entry)?;
+        let f = self
+            .instance
+            .get_func(&mut self.store, entry)
+            .ok_or_else(|| anyhow!("no export {entry}"))?;
+        let params: Vec<_> = f.ty(&self.store).params().collect();
+        if args.len() != params.len() {
+            bail!(
+                "entry {entry} expects {} arguments, got {}",
+                params.len(),
+                args.len()
+            );
+        }
+        for (index, (arg, ty)) in args.iter().zip(params.iter()).enumerate() {
+            if !arg.matches_ty(&self.store, ty)? {
+                bail!("entry {entry} argument {index} does not match {ty}");
+            }
+        }
+        Ok(())
     }
 
     pub fn take_poller(&mut self) -> Poller {
@@ -174,20 +291,34 @@ impl WeaveInstance {
 
     /// Call an exported entry. On unwind returns `Unwound` (its result, if the
     /// run had completed, is in the results area; on unwind there is none yet).
+    /// Only a fresh ready instance or a completed previous call accepts a new
+    /// entry. Invalid names/arguments are rejected without changing the state.
     pub fn call_entry(&mut self, entry: &str, args: &[Val]) -> Result<WorkResult> {
+        self.validate_entry_call(entry, args)?;
         let f = self
             .instance
             .get_func(&mut self.store, entry)
             .ok_or_else(|| anyhow!("no export {entry}"))?;
         let n = self.n_results(entry)?;
         let mut results = vec![Val::I32(0); n];
-        f.call(&mut self.store, args, &mut results)
-            .with_context(|| format!("calling entry {entry}"))?;
-        self.classify(results)
+        self.state = InstanceState::Running;
+        let outcome = f
+            .call(&mut self.store, args, &mut results)
+            .with_context(|| format!("calling entry {entry}"))
+            .and_then(|()| self.classify(results));
+        self.finish_execution(outcome)
     }
 
-    /// Re-enter and continue a previously-unwound workload.
+    /// Re-enter and continue a previously-unwound workload. Only `Paused`
+    /// instances may resume; staged, completed, retired, or failed ones reject.
     pub fn resume(&mut self) -> Result<WorkResult> {
+        self.require_state("resume", &[InstanceState::Paused])?;
+        self.state = InstanceState::Running;
+        let outcome = self.resume_inner();
+        self.finish_execution(outcome)
+    }
+
+    fn resume_inner(&mut self) -> Result<WorkResult> {
         let f = self
             .instance
             .get_func(&mut self.store, names::F_RESUME)
@@ -233,9 +364,25 @@ impl WeaveInstance {
         let flag = self.get_global_i32(names::G_FLAG)?;
         if flag == names::FLAG_UNWOUND {
             Ok(WorkResult::Unwound)
-        } else {
+        } else if flag == names::FLAG_DONE {
             Ok(WorkResult::Done(results))
+        } else {
+            bail!("invalid guest completion flag {flag}")
         }
+    }
+
+    fn finish_execution(&mut self, outcome: Result<WorkResult>) -> Result<WorkResult> {
+        if outcome.is_err() {
+            // A trapped guest cannot finish its migration; release any staged
+            // target immediately instead of keeping its connection until drop.
+            self.store.data_mut().poller = Poller::Run;
+        }
+        self.state = match &outcome {
+            Ok(WorkResult::Done(_)) => InstanceState::Completed,
+            Ok(WorkResult::Unwound) => InstanceState::Paused,
+            Err(_) => InstanceState::Failed,
+        };
+        outcome
     }
 
     // ---- state access ----
@@ -270,16 +417,19 @@ impl WeaveInstance {
     }
 
     pub fn set_global_i32(&mut self, name: &str, v: i32) -> Result<()> {
+        self.require_mutable("set global")?;
         let g = self
             .instance
             .get_global(&mut self.store, name)
             .ok_or_else(|| anyhow!("no global {name}"))?;
+        self.begin_staged_mutation();
         g.set(&mut self.store, Val::I32(v))
             .with_context(|| format!("set global {name}"))
     }
 
     /// Capture a complete portable snapshot of the current (paused) state.
     pub fn checkpoint(&mut self) -> Result<Snapshot> {
+        self.require_state("checkpoint", &[InstanceState::Paused])?;
         let mem_names = self.module.meta.memories.clone();
         let mut memories = Vec::new();
         for n in &mem_names {
@@ -306,7 +456,10 @@ impl WeaveInstance {
     }
 
     /// Restore a snapshot into this (freshly-instantiated, un-init'd) instance.
+    /// Preflight rejection leaves the unused target retryable. Once restoration
+    /// starts, any failure poisons the instance: construct a new target instead.
     pub fn restore(&mut self, snap: &Snapshot) -> Result<()> {
+        self.require_state("restore", &[InstanceState::RestoreTarget])?;
         if snap.module_hash != self.module.module_hash {
             bail!("snapshot module hash does not match this module");
         }
@@ -345,6 +498,32 @@ impl WeaveInstance {
         }
         self.validate_service_blobs(&snap.services)?;
 
+        validate_suspended_globals(&snap.globals, self.module.meta.entries.len())?;
+        for (i, name) in mem_names.iter().enumerate() {
+            let memory = self.memory(name)?;
+            if snap.memories[i].len() < memory.data_size(&self.store) {
+                bail!("snapshot memory {i} is smaller than the module's initial memory");
+            }
+            if memory.ty(&self.store).maximum().is_some_and(|maximum| {
+                (snap.memories[i].len() / weave_core::WASM_PAGE_SIZE) as u64 > maximum
+            }) {
+                bail!("snapshot memory {i} exceeds the module's maximum memory");
+            }
+        }
+
+        // From here onward, failure can leave memory or a service partially
+        // restored. Never expose that instance for execution or a second restore.
+        self.state = InstanceState::Restoring;
+        let outcome = self.restore_inner(snap, &mem_names);
+        self.state = if outcome.is_ok() {
+            InstanceState::Paused
+        } else {
+            InstanceState::Failed
+        };
+        outcome
+    }
+
+    fn restore_inner(&mut self, snap: &Snapshot, mem_names: &[String]) -> Result<()> {
         for (i, n) in mem_names.iter().enumerate() {
             let m = self.memory(n)?;
             let want = snap.memories[i].len();
@@ -365,16 +544,42 @@ impl WeaveInstance {
         Ok(())
     }
 
+    /// Low-level staging hook for receive adapters. It does not authorize guest
+    /// execution. Ordinary library consumers should restore a complete snapshot
+    /// with `restore`, or receive a committed instance through `accept_conn`.
     pub fn restore_services(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        self.require_state(
+            "restore services",
+            &[InstanceState::RestoreTarget, InstanceState::Restoring],
+        )?;
         self.validate_service_blobs(blobs)?;
+        // Mark failed before calling application code, so even a service panic
+        // caught by an outer embedder cannot make this target reusable.
+        self.state = InstanceState::Failed;
         for svc in self.store.data_mut().services.iter_mut() {
             let (_, blob) = blobs
                 .iter()
                 .find(|(name, _)| name == svc.name())
                 .expect("validated service set must contain every service");
-            svc.restore(blob)?;
+            if let Err(error) = svc.restore(blob) {
+                self.state = InstanceState::Failed;
+                return Err(error).context("restoring host service; discard this instance");
+            }
         }
+        self.state = InstanceState::Restoring;
         Ok(())
+    }
+
+    /// Called only once verified wire state has received protocol COMMIT.
+    pub(crate) fn commit_restored(&mut self) -> Result<()> {
+        self.require_state("commit restored state", &[InstanceState::Restoring])?;
+        self.state = InstanceState::Paused;
+        Ok(())
+    }
+
+    pub(crate) fn validate_restored_state(&mut self) -> Result<()> {
+        let globals = self.capture_globals()?;
+        validate_suspended_globals(&globals, self.module.meta.entries.len())
     }
 
     fn validate_service_blobs(&self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
@@ -412,7 +617,10 @@ impl WeaveInstance {
     }
 
     /// Ensure memory `mem` is at least `want` bytes (grows if short).
+    /// This is a low-level adapter operation; growing initialized guest memory
+    /// directly can invalidate its private layout. Prefer guest memory.grow.
     pub fn ensure_mem_bytes(&mut self, mem: usize, want: usize) -> Result<()> {
+        self.require_mutable("grow memory")?;
         let name = self
             .module
             .meta
@@ -423,6 +631,7 @@ impl WeaveInstance {
         let m = self.memory(&name)?;
         let have = m.data_size(&self.store);
         if want > have {
+            self.begin_staged_mutation();
             let grow = (want - have).div_ceil(weave_core::WASM_PAGE_SIZE);
             m.grow(&mut self.store, grow as u64)
                 .context("growing memory")?;
@@ -432,6 +641,7 @@ impl WeaveInstance {
 
     /// Write bytes into memory `mem` at `off`, growing if needed.
     pub fn write_mem(&mut self, mem: usize, off: usize, bytes: &[u8]) -> Result<()> {
+        self.require_mutable("write memory")?;
         let end = off
             .checked_add(bytes.len())
             .ok_or_else(|| anyhow!("memory write range overflow"))?;
@@ -444,8 +654,28 @@ impl WeaveInstance {
             .cloned()
             .ok_or_else(|| anyhow!("memory index {mem} out of bounds"))?;
         let m = self.memory(&name)?;
+        self.begin_staged_mutation();
         m.data_mut(&mut self.store)[off..end].copy_from_slice(bytes);
         Ok(())
+    }
+
+    fn require_mutable(&self, operation: &str) -> Result<()> {
+        self.require_state(
+            operation,
+            &[
+                InstanceState::Ready,
+                InstanceState::RestoreTarget,
+                InstanceState::Restoring,
+                InstanceState::Paused,
+                InstanceState::Completed,
+            ],
+        )
+    }
+
+    fn begin_staged_mutation(&mut self) {
+        if self.state == InstanceState::RestoreTarget {
+            self.state = InstanceState::Restoring;
+        }
     }
 
     /// A zero-copy `MemRead` view over the instance's memories. The returned
@@ -462,6 +692,19 @@ impl WeaveInstance {
             store: &self.store,
         })
     }
+}
+
+fn validate_suspended_globals(globals: &[(String, i32)], entries: usize) -> Result<()> {
+    let value = |name| globals.iter().find(|(n, _)| n == name).map(|(_, v)| *v);
+    if value(names::G_FLAG) != Some(names::FLAG_UNWOUND)
+        || value(names::G_STATE) != Some(names::STATE_UNWIND)
+    {
+        bail!("restore requires a suspended checkpoint (unwound flag and state)");
+    }
+    if !value(names::G_ENTRY).is_some_and(|entry| entry >= 0 && (entry as usize) < entries) {
+        bail!("snapshot contains an invalid suspended entry index");
+    }
+    Ok(())
 }
 
 fn core_value_type(value: wasmtime::ValType) -> Result<weave_core::ValType> {

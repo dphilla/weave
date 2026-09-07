@@ -39,9 +39,11 @@ pub enum MigrateOutcome {
     FailedNotStarted { error: String },
 }
 
-/// Migrate a *currently executing* workload to `target`. `entry`/`args` name
-/// the in-flight call. On return the instance has either migrated away or
-/// finished locally; on error the instance is rewound and still runnable.
+/// Start `entry` on a ready instance and migrate it to `target` while it runs.
+/// Invalid lifecycle/arguments are rejected before connecting. Before PREPARED,
+/// migration failure leaves the source resumable; any successful handoff result
+/// irrevocably retires it, including an unconfirmed COMMIT. A guest trap leaves
+/// a failed instance that must be discarded.
 pub fn migrate_running(
     inst: &mut WeaveInstance,
     entry: &str,
@@ -50,6 +52,7 @@ pub fn migrate_running(
     runtime_name: &str,
     opts: SourceOptions,
 ) -> Result<MigrateOutcome> {
+    inst.validate_entry_call(entry, args)?;
     let module = inst.module.clone();
     let mem_names = module.meta.memories.clone();
 
@@ -203,7 +206,9 @@ impl TargetHost for TargetDriver<'_, '_> {
     }
 
     fn restore_services(&mut self, services: &[(String, Vec<u8>)]) -> Result<()> {
-        self.inst.as_mut().unwrap().restore_services(services)
+        let inst = self.inst.as_mut().unwrap();
+        inst.validate_restored_state()?;
+        inst.restore_services(services)
     }
 
     fn with_mems(&mut self, visit: &mut dyn FnMut(&dyn MemRead) -> Result<()>) -> Result<()> {
@@ -234,9 +239,11 @@ pub fn accept_conn(conn: TcpStream, factory: &mut TargetFactory<'_>) -> Result<W
         hash: [0u8; 32],
     };
     run_target_session(conn, &mut driver).context("running target session")?;
-    driver
+    let mut inst = driver
         .inst
-        .ok_or_else(|| anyhow!("target session produced no instance"))
+        .ok_or_else(|| anyhow!("target session produced no instance"))?;
+    inst.commit_restored()?;
+    Ok(inst)
 }
 
 fn extract_meta(wasm: &[u8]) -> Result<Meta> {

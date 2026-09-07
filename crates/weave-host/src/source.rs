@@ -26,6 +26,8 @@ use crate::MemRead;
 use anyhow::{anyhow, bail, Context, Result};
 use std::io::{BufReader, BufWriter, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use weave_core::sha256::sha256;
 use weave_core::snapshot::StateHasher;
@@ -68,6 +70,7 @@ pub struct SourceMigration {
     pub rounds_completed: u32,
     opts: SourceOptions,
     converged: bool,
+    retirement_flag: Option<Arc<AtomicBool>>,
 }
 
 impl SourceMigration {
@@ -177,7 +180,15 @@ impl SourceMigration {
             rounds_completed: 0,
             opts,
             converged: false,
+            retirement_flag: None,
         })
+    }
+
+    /// Bind an embedder's irreversible ownership latch. Once PREPARED is
+    /// received, it is set before any COMMIT I/O, including uncertain handoffs.
+    /// Raw protocol users without a latch must retire based on `finish`'s result.
+    pub fn attach_retirement_flag(&mut self, flag: Arc<AtomicBool>) {
+        self.retirement_flag = Some(flag);
     }
 
     fn sync_layout(&mut self, mems: &dyn MemRead) -> Result<()> {
@@ -301,6 +312,9 @@ impl SourceMigration {
         // source must never rewind: COMMIT may have reached the target even
         // when a subsequent write/read reports an error. Prefer at-most-one
         // execution over silently creating a split brain.
+        if let Some(retired) = &self.retirement_flag {
+            retired.store(true, Ordering::Release);
+        }
         let mut commit_confirmed = false;
         let mut commit_error = None;
         let send_result = Frame::Commit

@@ -6,13 +6,20 @@
 //! and implements both ends of a live migration. The same design (poll host
 //! fn + read/write exported memory & globals + drive `__weave_resume`) is what
 //! the JS and Go plugins reimplement against their runtimes.
+//!
+//! [`WeaveInstance`] enforces its host-side [`InstanceState`]: call a fresh
+//! entry, checkpoint/resume only after unwind, and restore only into an unused
+//! uninitialized target. Retired migration sources and failed instances cannot
+//! execute again. Methods are synchronous; run them on an application worker
+//! thread when a UI/event loop must stay responsive. A [`CancellationHandle`]
+//! can request a resumable unwind from another thread at the next guest poll.
 
 pub mod instance;
 pub mod migrate;
 pub mod poll;
 pub mod serve;
 
-pub use instance::{Ctx, LinkFn, WeaveInstance, WorkResult};
+pub use instance::{CancellationHandle, Ctx, InstanceState, LinkFn, WeaveInstance, WorkResult};
 pub use poll::Poller;
 
 use anyhow::{Context, Result};

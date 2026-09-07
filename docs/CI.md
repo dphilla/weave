@@ -18,7 +18,8 @@ contains only triggers, permissions, job ordering, and artifact upload wiring.
 The qualification workflow never publishes a release and has only
 `contents: read` permission. A tag indicates a candidate to test, not proof
 that it passed; release publication should wait for this workflow's result.
-It composes Rust formatting/Clippy, units, workflow validation, checkpoint
+It composes Rust formatting/Clippy, units, workflow validation, structured
+control/preflight and adversarial CLI checks, checkpoint
 restore, the Rust guest, all runtime directions, fixed guest semantics and SIMD state migration,
 WAMR/Chrome, browser/WebRTC, host-service baseline, and adversity.
 It intentionally excludes the floating upstream corpus and the advisory Go
@@ -52,6 +53,17 @@ pass merely by producing the same wrong behavior everywhere. PRs run the
 native lane; main adds WAMR and live SIMD/multiple-memory state. Qualification
 runs both. See the [semantic lane documentation](../.github/ci/README.md#fixed-guest-semantics)
 for commands, fixtures, and replay settings.
+
+[`control-interface.sh`](../.github/ci/control-interface.sh) adds real CLI
+inspection and epoch-scoped operation recovery on a persistent
+Wasmtime→Node→wazero→WAMR→Wasmtime cycle, plus faulty loopback peers that test
+deadlines, reply identity, bounded framing, and lost acknowledgements. It runs
+in qualification and is directly replayable locally. The existing one-shot
+golden-event routes explicitly use synchronous legacy migration control;
+structured operation history is process-lifetime and cannot survive those
+nodes' intentional `--exit-on-done` shutdown. CLI/parser tests remain in the
+required Rust lane, and adapter control regressions remain in their language
+lanes.
 
 The weekly corpus accepts only explicit unsupported-feature rejections.
 Unexpected transformer errors, crashes, and invalid output are hard failures,

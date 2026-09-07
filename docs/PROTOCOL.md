@@ -4,11 +4,13 @@ A migration uses one ordered byte stream dialed by the **source** toward the
 **target**. Native nodes use TCP directly. Chrome carries the identical bytes
 either inside binary WebSocket messages through the demo's WebSocket↔TCP relay
 or directly to another browser over a reliable ordered RTCDataChannel. The
-same framing carries the tiny native TCP control API used by `weave
-migrate/status`.
+same framing carries the native TCP control API used by `weave
+migrate/status/operation`; its [versioned JSON contract](CONTROL.md) is separate
+from migration protocol version 2.
 
 Framing: `[type: u8][len: u32 LE][payload: len bytes]`. Strings are
-`u32 LE length + UTF-8`. Max frame 64 MiB.
+`u32 LE length + UTF-8`. Max frame 64 MiB, except structured control payloads
+(frames 23/24), which are raw UTF-8 JSON capped at 64 KiB before allocation.
 
 | # | frame | payload | direction |
 |---|---|---|---|
@@ -34,6 +36,8 @@ Framing: `[type: u8][len: u32 LE][payload: len bytes]`. Strings are
 | 20 | CTL_ERR | msg str | node→ctl |
 | 21 | COMMIT | — (irreversible ownership transfer) | src→dst |
 | 22 | COMMIT_OK | — (target observed COMMIT) | dst→src |
+| 23 | CTL_REQUEST | raw JSON, control schema version 1 | ctl→node |
+| 24 | CTL_RESPONSE | raw JSON, control schema version 1 | node→ctl |
 
 ## Phases
 
@@ -65,8 +69,9 @@ Protocol 2 deliberately chooses at-most-one active executor over availability
 during an ambiguous final network failure. Before PREPARED, the source can
 always rewind. After PREPARED, an unconfirmed COMMIT is reported as such and
 the source must not rewind; if COMMIT never reached the target, neither copy
-runs. Node control APIs return `CTL_ERR` with a `commit uncertain:` message in
-that case, even though the source has irreversibly retired; callers must not
+runs. Legacy control returns `CTL_ERR` with a `commit uncertain:` message in
+that case; structured control returns `COMMIT_UNCERTAIN` with source
+`ownership: "retired"`. In both cases callers must not
 retry by resuming the source. Durable exactly-once failover across
 process/machine crashes would
 require a coordinator or application-level fencing beyond this peer protocol.

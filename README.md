@@ -133,6 +133,8 @@ and artifact policy, see [`docs/CI.md`](docs/CI.md).
 For direct JavaScript or Rust embedding, see the
 [`safe library lifecycle guide`](docs/LIBRARY.md): guarded execution,
 cooperative cancellation, checkpoint/restore, and migration ownership rules.
+For human-readable inspection and versioned JSON control across native nodes,
+see [`the control and preflight guide`](docs/CONTROL.md#using-the-weave-cli).
 
 ## Quickstart
 
@@ -152,6 +154,30 @@ $W serve --listen 10.0.0.1:7777 --module app.woven.wasm --pre-woven --invoke run
 $W migrate --node 10.0.0.1:7777 --to 10.0.0.2:7777
 # => ok: migrated: 10 rounds, 1714 pages total, 1 in pause window
 ```
+
+Before running a module or choosing a destination:
+
+```sh
+$W inspect app.wasm --invoke run --arg 5000000
+$W inspect app.woven.wasm --pre-woven --node 10.0.0.2:7777 --json
+$W status --node 10.0.0.1:7777 --json
+```
+
+Inspection transforms/compiles and checks exports, exact import signatures,
+required Wasm features, and initial resource requirements without executing
+guest code. Target checks use advertised capabilities and the CLI's built-in
+host-service profile; they are not reservations or guarantees of future memory
+availability. Custom library hosts must validate their own contracts.
+
+For automation, save a caller-chosen operation ID and the source's `node_epoch`
+from `status` **before** submitting a migration. Pass both using
+`--operation-id ID --node-epoch EPOCH --json`, then query them with
+`weave operation`. A timeout does not cancel migration or authorize restarting
+the source. Records live only until the node process exits; use persistent
+`serve` nodes for recoverable observation. Explicit `--legacy` retains the old
+synchronous status/migration protocol, including one-shot `--exit-on-done`
+workflows, without operation replay guarantees. Native TCP listeners remain
+unauthenticated and must be restricted to trusted networks or protected tunnels.
 
 Checkpoint to disk instead of migrating:
 

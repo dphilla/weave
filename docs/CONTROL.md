@@ -179,8 +179,12 @@ Status includes a `capabilities` object; other actions return it as `null`:
   "runtime": "wasmtime",
   "adapter_version": "0.1.0",
   "migration_protocol": 2,
-  "services": ["env"],
-  "imports": [{"module":"env","name":"emit","params":["i32"],"results":[]}],
+  "services": ["env.emit", "env.emit32", "env.emit64"],
+  "imports": [
+    {"module":"env","name":"emit","params":["i32","i64"],"results":[]},
+    {"module":"env","name":"emit32","params":["i32"],"results":[]},
+    {"module":"env","name":"emit64","params":["i64"],"results":[]}
+  ],
   "features": ["simd", "multi_memory"],
   "limits": {
     "control_frame_bytes": 65536,
@@ -203,7 +207,8 @@ signature.
 Features list only confidently known enabled runtime support, using the
 preflight vocabulary (`multi_memory`, `simd`, `reference_types`, `bulk_memory`,
 `multi_value`, `sign_extension`, `saturating_float_to_int`, `extended_const`,
-`tail_call`, `memory64`, `threads`, `exceptions`, `gc`, `relaxed_simd`). Missing
+`tail_call`, `memory64`, `threads`, `exceptions`, `gc`, `relaxed_simd`,
+`function_references`). Missing
 features are not an assurance of support. Target receive limits do not promise
 that sufficient host resources are currently available, or that external
 services are semantically compatible. An unadvertised resource limit is null.
@@ -214,3 +219,121 @@ The source-compatible Rust `serve` API advertises custom services/imports as
 unknown; `serve_with_capabilities` accepts an explicit truthful advertisement.
 Inspection does not call service factories, link imports, instantiate a guest,
 or execute its original start function to discover capabilities.
+
+## Using the weave CLI
+
+The central Rust `weave` binary controls Wasmtime, Node, wazero, and WAMR TCP
+nodes with the same commands. Their existing adapter-specific legacy clients
+continue to work. This is not a browser UI, hosted control service, agent SDK,
+or authenticated rendezvous integration.
+
+```sh
+weave inspect guests/counter.wat --invoke run --arg 5000000
+weave inspect app.woven.wasm --pre-woven --node 127.0.0.1:9002 --json
+weave status --node 127.0.0.1:9001 --json
+```
+
+Save the status `node_epoch` and a unique operation ID in your application's
+own durable state before submission. The following example uses a placeholder
+epoch which must be replaced with the actual discovered value:
+
+```sh
+weave migrate --node 127.0.0.1:9001 --to 127.0.0.1:9002 \
+  --operation-id job-001 --node-epoch ACTUAL_EPOCH --timeout-ms 10000 --json
+weave operation --node 127.0.0.1:9001 \
+  --operation-id job-001 --node-epoch ACTUAL_EPOCH --wait --timeout-ms 10000 --json
+```
+
+An exact replay uses the original ID, epoch, and target. Do not discover a new
+epoch and quietly attach it to an old ID after a restart. A deliberate retry
+after `MIGRATION_FAILED` uses a **new** ID: replaying the old one returns its
+retained failure. `--operation-id` therefore requires `--node-epoch`.
+Interactive migrations may omit both; the CLI generates a random ID and prints
+the identity to stderr before submitting. JSON output includes the identity in
+the result or ambiguous-delivery error. If the CLI itself is killed before
+returning JSON, only a caller-persisted ID/epoch can reliably recover the query.
+
+`migrate` waits by default, with a 120,000 ms total deadline. `--no-wait` returns
+after acceptance. `operation` performs one lookup unless `--wait` is supplied.
+Status, operation, and target discovery during inspection default to 5,000 ms.
+`--timeout-ms` accepts 1–3,600,000 ms. One control deadline covers DNS,
+connecting, every read/write, and polling—not a fresh timeout per byte or poll.
+The inspection timeout bounds target discovery, not local transformation or
+compilation. No control timeout cancels the accepted operation.
+
+All commands have `--help`. Unknown/duplicate flags, missing values, unsupported
+flag combinations, and invalid numeric options are errors. `--arg` is
+repeatable and accepts negative numbers. `--` ends option parsing. Transform
+options cannot be mixed with `--pre-woven`.
+
+### Output and exit codes
+
+`inspect`, `status`, `migrate`, and `operation` support `--json`: stdout is one
+JSON value, with `schema_version`, `ok`, `code`, and `message`. Successful
+control replies use the response envelope above. Local CLI errors use those
+common fields and `retry`; ambiguous initial delivery also includes the
+submitted `node_epoch`, `operation_id`, `target`, and `ownership: "unknown"`.
+`inspect` returns a preflight report rather than a node response. Other commands
+retain guest progress output and do not accept `--json`.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | Successful read/check or accepted/successful operation; inspect `operation.state` to distinguish acceptance from completion. |
+| 1 | A legacy/general command failure (`COMMAND_FAILED`); transform diagnostics and exit status remain compatible with corpus tooling. |
+| 2 | `USAGE_ERROR`: invalid command-line input. |
+| 3 | `MODULE_INVALID` or `PREFLIGHT_BLOCKED`: incompatible or unknown preflight facts; inspect findings. |
+| 4 | A structured control failure, including a retained pre-commit migration failure. |
+| 5 | `DELIVERY_UNCERTAIN`, `OBSERVATION_UNCERTAIN`, `COMMIT_UNCERTAIN`, or `NODE_EPOCH_MISMATCH`; no safe automatic re-execution is inferred. |
+| 6 | `WAIT_TIMEOUT`: accepted work may still be running; query the same identity. |
+
+`DELIVERY_UNCERTAIN` means the first write/reply could not be established.
+`OBSERVATION_UNCERTAIN` means a later lookup failed after acceptance was
+observed. That result preserves the last observed operation and known source
+retirement, but is not a fresh node status. `WAIT_TIMEOUT` likewise preserves
+the last record; nested `accepted` does not prove the operation is still
+pending when the report is read. These client outcomes never trigger a fresh
+ID or automatic legacy fallback.
+
+### What preflight proves—and does not
+
+`inspect MODULE` accepts raw `.wasm`/`.wat`, or a transformed module with
+`--pre-woven`. It validates the transformed module's ABI, actual function
+imports against metadata, and optional `--invoke`/`--arg` call. It lists entry
+signatures, imports (including unsupported non-function imports), transformed
+exports, module hash/size, features, and initial memory requirements. It never
+instantiates, calls start/constructors, links services, or runs guest code.
+Consequently a module that later traps or loops forever can pass static checks.
+
+The `weave_cli_builtins` profile requires exact import signatures supplied by
+the central CLI and the exact three-service snapshot set—extra destination
+services are also incompatible. Imported memories/tables/globals are not
+provided by that CLI and are explicit blockers, although custom library hosts
+can support them. Unknown capability facts are blockers, not optimistic
+successes. `--node` compares the same profile with a live advertisement and
+includes its epoch/lifecycle so callers can assess availability separately.
+No checks reserve an idle destination, prove host-service semantics, bound
+future memory growth, or promise sufficient real-time host capacity.
+
+### Legacy and one-shot nodes
+
+`weave status --legacy --node ADDR` and
+`weave migrate --legacy --node ADDR --to ADDR` explicitly use frames 17–20.
+Legacy mode cannot combine with JSON, operation identity, or asynchronous
+control. It is also how the existing one-shot `--exit-on-done` conformance
+flows retain their synchronous completion reply.
+
+Use persistent nodes (omit `--exit-on-done`) for structured operation polling.
+An exit-on-done source can exit after handoff before a follow-up lookup reaches
+it. That is reported as observation uncertainty, even if the handoff actually
+succeeded. A shutdown grace period would only narrow this race, not supply
+durability; this interface deliberately does not claim that guarantee.
+
+## Reproducing the control checks
+
+Run `.github/ci/control-interface.sh` with the documented Node/Go/Rust/WAMR
+toolchains. It runs adversarial control-client peers and the actual four-runtime
+CLI cycle, preserving commands, responses, and node logs in an explicitly
+selected `WEAVE_CI_ARTIFACT_DIR`. Rust CLI binary tests additionally exercise
+side-effect-free inspection, argument failures before file writes, malformed
+import contracts, and negative arguments. See the CI guide for the broader
+golden-event, browser, package, corpus, and library suites.

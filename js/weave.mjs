@@ -871,6 +871,44 @@ function withDeadline(operation, timeoutMs, what) {
 
 // ---------------------------------------------------------------- instance
 
+// Kept outside the exported objects: writing a Wasm control global (or a
+// similarly named JavaScript property) must not grant execution ownership.
+const instanceLifecycles = new WeakMap();
+
+function invalidState(operation, state) {
+  const error = new Error(`${operation} is not allowed while the instance is ${state}`);
+  error.code = "WEAVE_INVALID_STATE";
+  return error;
+}
+
+function requireInstanceState(inst, operation, states, { allowDriver = false } = {}) {
+  const life = instanceLifecycles.get(inst);
+  if (life.capturingCheckpoint || life.snapshottingServices || life.restoringServices) {
+    throw invalidState(operation, life.restoringServices ? "service restore in progress" : "checkpoint capture in progress");
+  }
+  if (!states.includes(life.state) || (!allowDriver && life.driver !== null)) {
+    throw invalidState(operation, life.driver !== null ? `${life.state} (drive in progress)` : life.state);
+  }
+  return life;
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error("workload execution was cancelled");
+  error.name = "AbortError";
+  error.code = "WEAVE_ABORTED";
+  throw error;
+}
+
+function requireSynchronous(result, operation) {
+  if (result != null && typeof result.then === "function") {
+    // Observe a rejected async implementation, but never mistake its pending
+    // effects for a completed synchronous restore.
+    Promise.resolve(result).catch(() => {});
+    throw new TypeError(`${operation} must be synchronous`);
+  }
+}
+
 /**
  * services: Map name -> { imports: {module: {name: fn}}, snapshot(): Uint8Array,
  *                         restore(bytes): void }
@@ -879,6 +917,12 @@ function withDeadline(operation, timeoutMs, what) {
  */
 export class WeaveInstance {
   constructor(wasmBytes, services, opts = {}) {
+    // Own the module bytes and service membership used for its identity.
+    // Service implementation objects themselves remain application-owned.
+    if (!ArrayBuffer.isView(wasmBytes) || wasmBytes.BYTES_PER_ELEMENT !== 1) {
+      throw new TypeError("WebAssembly module bytes must be a byte array");
+    }
+    wasmBytes = new Uint8Array(wasmBytes);
     this.wasmBytes = wasmBytes;
     this.moduleHash = sha256(wasmBytes);
     this.meta = extractMeta(wasmBytes);
@@ -892,30 +936,59 @@ export class WeaveInstance {
     const serviceNames = [...services.keys()];
     requireUniqueStrings(serviceNames, "host service");
     requireUnicodeScalarStrings(serviceNames, "host service");
-    this.services = services;
+    this.services = new Map(services);
     this.yieldMs = opts.yieldMs ?? 50;
+    if (!Number.isFinite(this.yieldMs) || this.yieldMs < 0) {
+      throw new RangeError("yieldMs must be a finite non-negative number");
+    }
     this.lastYield = 0;
     // poll behavior: "run" | "unwind" | "initializing" | {afterPolls: n}
     this.pollMode = "run";
     this.pollCount = 0;
     this.instance = null;
+    instanceLifecycles.set(this, { state: "created", driver: null, migration: null });
   }
 
+  /** Host-side lifecycle; independent of caller-writable Wasm globals. */
+  get lifecycle() { return instanceLifecycles.get(this).state; }
+
   async instantiate() {
-    const imports = { weave: { poll: () => this._poll() } };
-    for (const svc of this.services.values()) {
-      for (const [mod, fns] of Object.entries(svc.imports ?? {})) {
-        imports[mod] = { ...(imports[mod] ?? {}), ...fns };
+    const life = requireInstanceState(this, "instantiate", ["created"]);
+    life.state = "instantiating";
+    try {
+      const imports = Object.create(null);
+      imports.weave = Object.assign(Object.create(null), { poll: () => this._poll() });
+      for (const svc of this.services.values()) {
+        for (const [mod, fns] of Object.entries(svc.imports ?? {})) {
+          imports[mod] ??= Object.create(null);
+          for (const [name, value] of Object.entries(fns)) {
+            if (Object.hasOwn(imports[mod], name)) {
+              throw new TypeError(`duplicate or reserved host import ${mod}.${name}`);
+            }
+            imports[mod][name] = typeof value === "function" ? (...args) => {
+              const result = value(...args);
+              requireSynchronous(result, `host import ${mod}.${name}`);
+              return result;
+            } : value;
+          }
+        }
       }
+      const { instance } = await WebAssembly.instantiate(this.wasmBytes, imports);
+      this.instance = instance;
+      life.state = "uninitialized";
+      return this;
+    } catch (error) {
+      // ABI validation excludes implicit guest starts: a failed instantiate
+      // has not run the workload and may be retried after fixing its imports.
+      life.state = "created";
+      throw error;
     }
-    const { instance } = await WebAssembly.instantiate(this.wasmBytes, imports);
-    this.instance = instance;
-    return this;
   }
 
   _poll() {
     this.pollCount++;
     if (this.pollMode === "initializing") return 0;
+    if (instanceLifecycles.get(this).driver?.signal?.aborted) return 1;
     if (this.pollMode === "unwind") return 1;
     if (typeof this.pollMode === "object" && "afterPolls" in this.pollMode) {
       if (this.pollMode.afterPolls <= 0) return 1;
@@ -934,6 +1007,8 @@ export class WeaveInstance {
   memBytes(i = 0) { return new Uint8Array(this.mem(i).buffer); }
 
   init() {
+    const life = requireInstanceState(this, "init", ["uninitialized"]);
+    life.state = "initializing";
     // The relocated guest start function must finish before an entry can run.
     // init() is synchronous, so there is no driver to resume a yielded start;
     // suppress all polls, including a time slice expiring during initialization.
@@ -941,6 +1016,10 @@ export class WeaveInstance {
     this.pollMode = "initializing";
     try {
       this.ex().__weave_init();
+      life.state = "ready";
+    } catch (error) {
+      life.state = "failed";
+      throw error;
     } finally {
       this.pollMode = previousPollMode;
     }
@@ -950,34 +1029,99 @@ export class WeaveInstance {
    * Run an entry (or resume) cooperatively until it completes or a callback
    * asks to keep the unwound state.
    *
-   * onYield: async ({instance}) => "continue" | "hold"
+   * onYield: async (instance, {signal}) => "continue" | "hold"
    *   Called at every unwind. "continue" rewinds immediately; "hold" stops the
    *   driver loop with the guest checkpointed in memory.
    *
+   * A real event-loop turn is yielded at every unwind, including with no
+   * callback. opts.signal cooperatively cancels at safe unwind boundaries;
+   * AbortError leaves a paused workload resumable. A pending user callback
+   * must settle before cancellation releases ownership (it receives signal).
    * Returns {status: "done", results} | {status: "held"}.
    */
-  async drive(entry, args, onYield) {
+  async drive(entry, args, onYield, opts = {}) {
+    const life = requireInstanceState(this, "drive", entry === null ? ["paused"] : ["ready", "completed"]);
+    if (life.migration?._operation != null) {
+      throw invalidState("drive", "migration operation in progress");
+    }
+    if (onYield !== undefined && onYield !== null && typeof onYield !== "function") {
+      throw new TypeError("onYield must be a function");
+    }
+    const signal = opts.signal;
+    if (signal != null && (typeof signal.aborted !== "boolean" || typeof signal.addEventListener !== "function")) {
+      throw new TypeError("signal must be an AbortSignal");
+    }
+    if (entry === null) {
+      if (args != null && (!Array.isArray(args) || args.length !== 0)) {
+        throw new TypeError("resume does not accept entry arguments");
+      }
+    } else {
+      const signature = this.meta.entries.find((item) => item.name === entry);
+      if (!signature) throw new TypeError(`no weave entry ${entry}`);
+      if (!Array.isArray(args) || args.length !== signature.params.length) {
+        throw new TypeError(`${entry} requires ${signature.params.length} argument(s)`);
+      }
+      if (signature.params.includes("v128") || signature.results.includes("v128")) {
+        throw new TypeError("JavaScript cannot start a public v128 entry; use a scalar wrapper");
+      }
+      for (const [i, type] of signature.params.entries()) {
+        const value = args[i];
+        const valid = type === "i32" ? Number.isInteger(value) && value >= -2147483648 && value <= 2147483647
+          : type === "i64" ? typeof value === "bigint" && BigInt.asIntN(64, value) === value
+          : type === "f32" || type === "f64" ? typeof value === "number"
+          : type === "funcref" ? value === null || typeof value === "function" : false;
+        if (!valid) throw new TypeError(`argument ${i} of ${entry} must be ${type}`);
+      }
+      args = args.slice();
+    }
+    throwIfAborted(signal);
+    const driver = { signal };
+    life.driver = driver;
     let phase = entry === null ? "resume" : "start";
-    for (;;) {
-      this.lastYield = Date.now();
-      if (phase === "start") {
-        this.setG(G.state, STATE_RUN);
-        this.ex()[entry](...args);
-        phase = "resume";
-      } else {
-        this.ex().__weave_resume();
+    try {
+      for (;;) {
+        throwIfAborted(signal);
+        life.state = "running";
+        this.lastYield = Date.now();
+        try {
+          if (phase === "start") {
+            this.setG(G.state, STATE_RUN);
+            this.ex()[entry](...args);
+            phase = "resume";
+          } else {
+            this.ex().__weave_resume();
+          }
+          const flag = this.g(G.flag);
+          if (flag === FLAG_DONE) {
+            life.state = "completed";
+            life.migration = null;
+            return { status: "done", results: this.readResults() };
+          }
+          if (flag !== FLAG_UNWOUND) throw new Error(`invalid weave execution flag ${flag}`);
+          life.state = "paused";
+        } catch (error) {
+          life.state = "failed";
+          life.migration = null;
+          throw error;
+        }
+        // Promise/microtask yielding alone starves timers and network I/O.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        throwIfAborted(signal);
+        const verdict = onYield ? await onYield(this, { signal }) : "continue";
+        throwIfAborted(signal);
+        if (verdict === "hold") return { status: "held" };
+        if (verdict !== "continue") throw new TypeError('onYield must return "continue" or "hold"');
+        if (life.state !== "paused" || life.migration?._operation) {
+          throw invalidState("continue", life.state);
+        }
       }
-      if (this.g(G.flag) === FLAG_DONE) {
-        return { status: "done", results: this.readResults() };
-      }
-      // unwound
-      const verdict = onYield ? await onYield(this) : "continue";
-      if (verdict === "hold") return { status: "held" };
-      // fall through: rewind and continue
+    } finally {
+      if (life.driver === driver) life.driver = null;
     }
   }
 
   readResults() {
+    requireInstanceState(this, "readResults", ["completed"], { allowDriver: true });
     const entryIdx = this.g(G.entry);
     const entry = this.meta.entries[entryIdx];
     const rbase = this.g(G.rbase) >>> 0;
@@ -1000,18 +1144,114 @@ export class WeaveInstance {
     return this.meta.controlGlobals.map((n) => [n, this.g(n)]);
   }
 
+  /** Copy a held continuation, including inside onYield. This does not
+   * transfer ownership or serialize external host resources. */
+  checkpoint() {
+    const life = requireInstanceState(this, "checkpoint", ["paused"], { allowDriver: true });
+    life.capturingCheckpoint = true;
+    try {
+      const services = this.serviceBlobs();
+      return {
+        moduleHash: new Uint8Array(this.moduleHash),
+        memories: this.meta.memories.map((_, i) => new Uint8Array(this.memBytes(i))),
+        globals: this.captureGlobals(),
+        services,
+      };
+    } finally {
+      life.capturingCheckpoint = false;
+    }
+  }
+
+  /** Restore an in-memory checkpoint into a newly instantiated, uninitialized
+   * instance. Validation errors leave it uninitialized; application failures
+   * after mutation begins make it unusable. Never call init() after restore. */
+  restore(snapshot) {
+    const life = requireInstanceState(this, "restore", ["uninitialized"]);
+    if (!(snapshot?.moduleHash instanceof Uint8Array) || !equalBytes(snapshot.moduleHash, this.moduleHash)) {
+      throw new TypeError("snapshot module hash does not match this module");
+    }
+    if (!Array.isArray(snapshot.memories) || snapshot.memories.length !== this.meta.memories.length) {
+      throw new TypeError("snapshot memory count mismatch");
+    }
+    for (const [i, bytes] of snapshot.memories.entries()) {
+      if (!(bytes instanceof Uint8Array) || bytes.length % WASM_PAGE !== 0) {
+        throw new TypeError(`snapshot memory ${i} must contain complete Wasm pages`);
+      }
+      if (bytes.length < this.memBytes(i).length) {
+        throw new RangeError(`snapshot memory ${i} is smaller than the fresh memory`);
+      }
+    }
+    if (!Array.isArray(snapshot.globals) || snapshot.globals.some((pair) =>
+      !Array.isArray(pair) || pair.length !== 2 || !Number.isInteger(pair[1]) || pair[1] < -2147483648 || pair[1] > 2147483647) ||
+      !equalNames(snapshot.globals.map(([name]) => name), this.meta.controlGlobals)) {
+      throw new TypeError("snapshot control-global contract mismatch");
+    }
+    const globals = new Map(snapshot.globals);
+    if (globals.get(G.flag) !== FLAG_UNWOUND || globals.get(G.state) !== STATE_UNWIND ||
+      globals.get(G.entry) < 0 || globals.get(G.entry) >= this.meta.entries.length) {
+      throw new TypeError("snapshot is not a suspended entry");
+    }
+    if (!Array.isArray(snapshot.services) || snapshot.services.some((pair) =>
+      !Array.isArray(pair) || pair.length !== 2 || !(pair[1] instanceof Uint8Array)) ||
+      !equalNames(snapshot.services.map(([name]) => name), [...this.services.keys()].sort(compareUtf8Strings))) {
+      throw new TypeError("snapshot host-service contract mismatch");
+    }
+    // Copy before mutating the target. A service restore cannot change later
+    // service blobs or the caller's saved checkpoint by retaining its input.
+    const memories = snapshot.memories.map((bytes) => new Uint8Array(bytes));
+    const controlGlobals = snapshot.globals.map(([name, value]) => [name, value]);
+    const services = snapshot.services.map(([name, bytes]) => [name, new Uint8Array(bytes)]);
+    life.state = "staged";
+    try {
+      for (const [i, bytes] of memories.entries()) {
+        this.growMemTo(i, bytes.length / WASM_PAGE);
+        this.memBytes(i).set(bytes);
+      }
+      for (const [name, value] of controlGlobals) this.setG(name, value);
+      this.restoreServices(services);
+      life.state = "paused";
+      return this;
+    } catch (error) {
+      life.state = "failed";
+      throw error;
+    }
+  }
+
   serviceBlobs() {
-    const names = [...this.services.keys()].sort(compareUtf8Strings);
-    return names.map((n) => [n, this.services.get(n).snapshot()]);
+    const life = instanceLifecycles.get(this);
+    if (life.snapshottingServices || life.restoringServices) {
+      throw invalidState("serviceBlobs", "service callback in progress");
+    }
+    life.snapshottingServices = true;
+    try {
+      const names = [...this.services.keys()].sort(compareUtf8Strings);
+      return names.map((name) => {
+        const bytes = this.services.get(name).snapshot();
+        requireSynchronous(bytes, `host service ${name} snapshot`);
+        if (!(bytes instanceof Uint8Array)) throw new TypeError(`host service ${name} snapshot must return Uint8Array`);
+        return [name, new Uint8Array(bytes)];
+      });
+    } finally {
+      life.snapshottingServices = false;
+    }
   }
 
   restoreServices(blobs) {
+    const life = requireInstanceState(this, "restoreServices", ["created", "uninitialized", "staged"]);
     const expected = [...this.services.keys()].sort(compareUtf8Strings);
     const actual = blobs.map(([name]) => name);
     if (!equalNames(actual, expected)) throw new Error("host-service contract mismatch");
-    for (const [name, blob] of blobs) {
-      const svc = this.services.get(name);
-      svc.restore(blob);
+    life.restoringServices = true;
+    try {
+      for (const [name, blob] of blobs) {
+        const svc = this.services.get(name);
+        requireSynchronous(svc.restore(blob), `host service ${name} restore`);
+      }
+    } catch (error) {
+      life.state = "failed";
+      throw error;
+    } finally {
+      life.restoringServices = false;
     }
   }
 
@@ -1138,6 +1378,8 @@ export class SourceMigration {
     this.readTimeoutMs = opts.readTimeoutMs ?? 120_000;
     this.commitTimeoutMs = opts.commitTimeoutMs ?? 15_000;
     for (const [name, value] of [
+      ["budgetBytes", this.budget],
+      ["maxRounds", this.maxRounds],
       ["readTimeoutMs", this.readTimeoutMs],
       ["commitTimeoutMs", this.commitTimeoutMs],
     ]) {
@@ -1145,7 +1387,48 @@ export class SourceMigration {
         throw new RangeError(`${name} must be a positive safe integer`);
       }
     }
+    if (!Number.isSafeInteger(this.dirtyThreshold) || this.dirtyThreshold < 0) {
+      throw new RangeError("dirtyPageThreshold must be a non-negative safe integer");
+    }
     this.converged = false;
+    this._phase = "new";
+    this._operation = null;
+    // Duck-typed low-level adapters remain supported. WeaveInstance supplies
+    // the host-owned lifecycle needed to enforce execution/commit safety.
+    if (instanceLifecycles.has(inst)) {
+      const life = requireInstanceState(inst, "migration", ["paused"], { allowDriver: true });
+      if (life.migration !== null) throw invalidState("migration", "another migration is active");
+      life.migration = this;
+    }
+  }
+
+  _begin(operation, phases, { final = false } = {}) {
+    if (this._operation !== null || !phases.includes(this._phase)) {
+      throw invalidState(operation, this._operation ?? this._phase);
+    }
+    const life = instanceLifecycles.get(this.inst);
+    if (life) {
+      requireInstanceState(this.inst, operation, ["paused"], { allowDriver: !final });
+      if (life.migration !== this) throw invalidState(operation, "migration no longer owns this instance");
+      if (final) life.state = "finalizing";
+    }
+    this._operation = operation;
+    return life;
+  }
+
+  _fail() {
+    this._phase = "failed";
+    const life = instanceLifecycles.get(this.inst);
+    if (life?.migration === this) life.migration = null;
+  }
+
+  /** Abandon an idle pre-commit migration; never revives a retired source. */
+  async abort() {
+    if (this._operation !== null || !["new", "precopy"].includes(this._phase)) {
+      throw invalidState("abort migration", this._operation ?? this._phase);
+    }
+    this._fail();
+    await this.t.close?.();
   }
 
   _readFrame(what) {
@@ -1153,6 +1436,19 @@ export class SourceMigration {
   }
 
   async handshake() {
+    this._begin("handshake", ["new"]);
+    try {
+      await this._handshake();
+      this._phase = "precopy";
+    } catch (error) {
+      this._fail();
+      throw error;
+    } finally {
+      this._operation = null;
+    }
+  }
+
+  async _handshake() {
     const hw = new Writer();
     hw.u8(PROTO_VERSION).u8(1).str(this.runtimeName);
     await this.t.write(frame(FT.HELLO, hw.out()));
@@ -1210,6 +1506,18 @@ export class SourceMigration {
 
   /** One pre-copy round step. Returns true when converged (go final). */
   async precopyStep() {
+    this._begin("precopyStep", ["precopy"]);
+    try {
+      return await this._precopyStep();
+    } catch (error) {
+      this._fail();
+      throw error;
+    } finally {
+      this._operation = null;
+    }
+  }
+
+  async _precopyStep() {
     if (this.converged) return true;
     await this.syncLayout();
     const step = this.tracker.scanStep(this.inst, this.budget);
@@ -1241,6 +1549,23 @@ export class SourceMigration {
 
   /** Final stop-and-copy after the guest has unwound. */
   async finish() {
+    const life = this._begin("finish", ["precopy"], { final: true });
+    try {
+      const result = await this._finish();
+      this._phase = "finished";
+      return result;
+    } catch (error) {
+      // No exception past PREPARED reaches this rollback path.
+      if (life?.state === "finalizing") life.state = "paused";
+      this._fail();
+      throw error;
+    } finally {
+      this._operation = null;
+      if (life?.migration === this) life.migration = null;
+    }
+  }
+
+  async _finish() {
     await this.t.write(frame(FT.FINAL_BEGIN));
     await this.syncLayout();
     let finalPages = 0;
@@ -1274,6 +1599,8 @@ export class SourceMigration {
     const prepared = await this._readFrame("PREPARED");
     if (prepared.type !== FT.PREPARED) throw abortError(prepared);
     if (prepared.payload.length !== 0) throw new Error("PREPARED must have an empty payload");
+    const life = instanceLifecycles.get(this.inst);
+    if (life) life.state = "retired";
 
     // PREPARED means the peer has validated and restored the state but is not
     // executing it. From this point onward the source must never rewind
@@ -1507,6 +1834,7 @@ export async function acceptMigration(transport, makeServices, opts = {}) {
     const services = makeServices();
     inst = new WeaveInstance(wasmBytes, services, opts);
     await inst.instantiate(); // NOTE: __weave_init is NOT called on restore
+    instanceLifecycles.get(inst).state = "staged";
     // The source omits never-dirtied all-zero pages. Active data segments make
     // a fresh instance nonzero, so reset every target memory to the baseline
     // assumed by PageTracker before accepting streamed pages.
@@ -1526,189 +1854,200 @@ export async function acceptMigration(transport, makeServices, opts = {}) {
   let pagesSeen = new Set();
   let globals = [];
   let services_ = [];
-  for (;;) {
-    const f = await readTargetFrame("migration frame");
-    switch (f.type) {
-      case FT.MEM_LAYOUT: {
-        if (phase !== "precopy" && phase !== "final-pages") {
-          await rejectMigration(t, 5, "MEM_LAYOUT after final globals");
-        }
-        const c = new Cursor(f.payload);
-        const n = c.u8();
-        if (n !== inst.meta.memories.length) {
-          await rejectMigration(
-            t,
-            5,
-            `memory layout count mismatch: expected ${inst.meta.memories.length}, got ${n}`,
-          );
-        }
-        const nextLayout = [];
-        let totalBytes = 0n;
-        for (let m = 0; m < n; m++) {
-          const pages = c.u64();
-          if (pages > BigInt(Number.MAX_SAFE_INTEGER)) {
-            await rejectMigration(t, 5, "memory page count exceeds JavaScript integer range");
+  try {
+    for (;;) {
+      const f = await readTargetFrame("migration frame");
+      switch (f.type) {
+        case FT.MEM_LAYOUT: {
+          if (phase !== "precopy" && phase !== "final-pages") {
+            await rejectMigration(t, 5, "MEM_LAYOUT after final globals");
           }
-          if (layout !== null && pages < layout[m]) {
-            await rejectMigration(t, 5, "memory layout cannot shrink during migration");
+          const c = new Cursor(f.payload);
+          const n = c.u8();
+          if (n !== inst.meta.memories.length) {
+            await rejectMigration(
+              t,
+              5,
+              `memory layout count mismatch: expected ${inst.meta.memories.length}, got ${n}`,
+            );
           }
-          totalBytes += pages * BigInt(WASM_PAGE);
-          nextLayout.push(pages);
+          const nextLayout = [];
+          let totalBytes = 0n;
+          for (let m = 0; m < n; m++) {
+            const pages = c.u64();
+            if (pages > BigInt(Number.MAX_SAFE_INTEGER)) {
+              await rejectMigration(t, 5, "memory page count exceeds JavaScript integer range");
+            }
+            if (layout !== null && pages < layout[m]) {
+              await rejectMigration(t, 5, "memory layout cannot shrink during migration");
+            }
+            totalBytes += pages * BigInt(WASM_PAGE);
+            nextLayout.push(pages);
+          }
+          c.done("MEM_LAYOUT");
+          if (totalBytes > BigInt(maxMemoryBytes)) {
+            await rejectMigration(
+              t,
+              5,
+              `announced memory layout is ${totalBytes} bytes, exceeding target limit ${maxMemoryBytes}`,
+            );
+          }
+          try {
+            for (let m = 0; m < n; m++) inst.growMemTo(m, Number(nextLayout[m]));
+          } catch (error) {
+            await rejectMigration(t, 5, `cannot apply memory layout: ${error}`, error);
+          }
+          layout = nextLayout;
+          break;
         }
-        c.done("MEM_LAYOUT");
-        if (totalBytes > BigInt(maxMemoryBytes)) {
-          await rejectMigration(
-            t,
-            5,
-            `announced memory layout is ${totalBytes} bytes, exceeding target limit ${maxMemoryBytes}`,
-          );
+        case FT.PAGE: {
+          if (phase !== "precopy" && phase !== "final-pages") {
+            await rejectMigration(t, 5, "PAGE after final globals");
+          }
+          if (f.payload.length !== 9 + WPAGE) {
+            await rejectMigration(t, 5, `invalid page payload size: ${f.payload.length - 9}`);
+          }
+          const c = new Cursor(f.payload);
+          const mem = c.u8();
+          const pageNo = c.u64();
+          const bytes = c.bytes(WPAGE);
+          c.done("PAGE");
+          if (layout === null || mem >= layout.length) {
+            await rejectMigration(t, 5, "PAGE before a matching MEM_LAYOUT");
+          }
+          const off64 = pageNo * BigInt(WPAGE);
+          const end64 = off64 + BigInt(WPAGE);
+          if (end64 > layout[mem] * BigInt(WASM_PAGE)) {
+            await rejectMigration(t, 5, "PAGE exceeds announced memory layout");
+          }
+          if (off64 > BigInt(Number.MAX_SAFE_INTEGER)) {
+            await rejectMigration(t, 5, "page offset exceeds JavaScript integer range");
+          }
+          const pageKey = `${mem}:${pageNo}`;
+          if (pagesSeen.has(pageKey)) {
+            await rejectMigration(t, 5, "duplicate PAGE in migration round");
+          }
+          pagesSeen.add(pageKey);
+          inst.memBytes(mem).set(bytes, Number(off64));
+          if (phase === "precopy") roundPages++;
+          break;
         }
-        try {
-          for (let m = 0; m < n; m++) inst.growMemTo(m, Number(nextLayout[m]));
-        } catch (error) {
-          await rejectMigration(t, 5, `cannot apply memory layout: ${error}`, error);
+        case FT.ROUND_END: {
+          if (phase !== "precopy") {
+            await rejectMigration(t, 5, "ROUND_END during final transfer");
+          }
+          const c = new Cursor(f.payload);
+          const round = c.u32();
+          const pagesSent = c.u64();
+          c.done("ROUND_END");
+          if (round !== expectedRound || pagesSent !== roundPages) {
+            await rejectMigration(
+              t,
+              5,
+              `invalid round terminator: expected round ${expectedRound} with ${roundPages} pages, got round ${round} with ${pagesSent}`,
+            );
+          }
+          await t.write(frame(FT.ROUND_ACK));
+          expectedRound++;
+          roundPages = 0n;
+          pagesSeen.clear();
+          break;
         }
-        layout = nextLayout;
-        break;
-      }
-      case FT.PAGE: {
-        if (phase !== "precopy" && phase !== "final-pages") {
-          await rejectMigration(t, 5, "PAGE after final globals");
+        case FT.FINAL_BEGIN:
+          if (f.payload.length !== 0 || phase !== "precopy" || roundPages !== 0n) {
+            await rejectMigration(t, 5, "FINAL_BEGIN inside an incomplete round");
+          }
+          phase = "final-pages";
+          pagesSeen = new Set();
+          break;
+        case FT.GLOBALS: {
+          if (phase !== "final-pages") await rejectMigration(t, 5, "GLOBALS out of order");
+          const c = new Cursor(f.payload);
+          const n = c.u16();
+          globals = [];
+          for (let i = 0; i < n; i++) {
+            const name = c.str();
+            const v = c.u32() | 0;
+            globals.push([name, v]);
+          }
+          c.done("GLOBALS");
+          if (!equalNames(globals.map(([name]) => name), expectedGlobals)) {
+            await rejectMigration(t, 5, "control-global contract mismatch");
+          }
+          phase = "final-globals";
+          break;
         }
-        if (f.payload.length !== 9 + WPAGE) {
-          await rejectMigration(t, 5, `invalid page payload size: ${f.payload.length - 9}`);
+        case FT.SERVICES: {
+          if (phase !== "final-globals") await rejectMigration(t, 5, "SERVICES out of order");
+          const c = new Cursor(f.payload);
+          const n = c.u16();
+          services_ = [];
+          for (let i = 0; i < n; i++) {
+            const name = c.str();
+            const blob = c.bytes(c.u32()).slice();
+            services_.push([name, blob]);
+          }
+          c.done("SERVICES");
+          if (!equalNames(services_.map(([name]) => name), expectedServices)) {
+            await rejectMigration(t, 5, "host-service contract mismatch");
+          }
+          phase = "final-services";
+          break;
         }
-        const c = new Cursor(f.payload);
-        const mem = c.u8();
-        const pageNo = c.u64();
-        const bytes = c.bytes(WPAGE);
-        c.done("PAGE");
-        if (layout === null || mem >= layout.length) {
-          await rejectMigration(t, 5, "PAGE before a matching MEM_LAYOUT");
-        }
-        const off64 = pageNo * BigInt(WPAGE);
-        const end64 = off64 + BigInt(WPAGE);
-        if (end64 > layout[mem] * BigInt(WASM_PAGE)) {
-          await rejectMigration(t, 5, "PAGE exceeds announced memory layout");
-        }
-        if (off64 > BigInt(Number.MAX_SAFE_INTEGER)) {
-          await rejectMigration(t, 5, "page offset exceeds JavaScript integer range");
-        }
-        const pageKey = `${mem}:${pageNo}`;
-        if (pagesSeen.has(pageKey)) {
-          await rejectMigration(t, 5, "duplicate PAGE in migration round");
-        }
-        pagesSeen.add(pageKey);
-        inst.memBytes(mem).set(bytes, Number(off64));
-        if (phase === "precopy") roundPages++;
-        break;
-      }
-      case FT.ROUND_END: {
-        if (phase !== "precopy") {
-          await rejectMigration(t, 5, "ROUND_END during final transfer");
-        }
-        const c = new Cursor(f.payload);
-        const round = c.u32();
-        const pagesSent = c.u64();
-        c.done("ROUND_END");
-        if (round !== expectedRound || pagesSent !== roundPages) {
-          await rejectMigration(
-            t,
-            5,
-            `invalid round terminator: expected round ${expectedRound} with ${roundPages} pages, got round ${round} with ${pagesSent}`,
-          );
-        }
-        await t.write(frame(FT.ROUND_ACK));
-        expectedRound++;
-        roundPages = 0n;
-        pagesSeen.clear();
-        break;
-      }
-      case FT.FINAL_BEGIN:
-        if (f.payload.length !== 0 || phase !== "precopy" || roundPages !== 0n) {
-          await rejectMigration(t, 5, "FINAL_BEGIN inside an incomplete round");
-        }
-        phase = "final-pages";
-        pagesSeen = new Set();
-        break;
-      case FT.GLOBALS: {
-        if (phase !== "final-pages") await rejectMigration(t, 5, "GLOBALS out of order");
-        const c = new Cursor(f.payload);
-        const n = c.u16();
-        globals = [];
-        for (let i = 0; i < n; i++) {
-          const name = c.str();
-          const v = c.u32() | 0;
-          globals.push([name, v]);
-        }
-        c.done("GLOBALS");
-        if (!equalNames(globals.map(([name]) => name), expectedGlobals)) {
-          await rejectMigration(t, 5, "control-global contract mismatch");
-        }
-        phase = "final-globals";
-        break;
-      }
-      case FT.SERVICES: {
-        if (phase !== "final-globals") await rejectMigration(t, 5, "SERVICES out of order");
-        const c = new Cursor(f.payload);
-        const n = c.u16();
-        services_ = [];
-        for (let i = 0; i < n; i++) {
-          const name = c.str();
-          const blob = c.bytes(c.u32()).slice();
-          services_.push([name, blob]);
-        }
-        c.done("SERVICES");
-        if (!equalNames(services_.map(([name]) => name), expectedServices)) {
-          await rejectMigration(t, 5, "host-service contract mismatch");
-        }
-        phase = "final-services";
-        break;
-      }
-      case FT.FINAL_END: {
-        if (phase !== "final-services") {
-          await rejectMigration(t, 5, "FINAL_END before complete final state");
-        }
-        if (f.payload.length !== 32) await rejectMigration(t, 5, "invalid FINAL_END payload");
-        const ours = inst.stateHash(globals, services_);
-        if (!equalBytes(ours, f.payload)) {
-          await rejectMigration(t, 4, "migrated state hash mismatch — refusing to resume");
-        }
-        try {
-          for (const [n, v] of globals) inst.setG(n, v);
-          inst.restoreServices(services_);
-        } catch (error) {
-          await rejectMigration(t, 5, `restoring migrated state failed: ${error}`, error);
-        }
-        await t.write(frame(FT.PREPARED));
-        const commit = await readTargetFrame("COMMIT");
-        if (commit.type === FT.ABORT) throw abortError(commit);
-        if (commit.type !== FT.COMMIT) {
-          await rejectMigration(t, 5, `expected COMMIT after PREPARED, got ${commit.type}`);
-        }
-        if (commit.payload.length !== 0) {
-          await rejectMigration(t, 5, "COMMIT must have an empty payload");
-        }
+        case FT.FINAL_END: {
+          if (phase !== "final-services") {
+            await rejectMigration(t, 5, "FINAL_END before complete final state");
+          }
+          if (f.payload.length !== 32) await rejectMigration(t, 5, "invalid FINAL_END payload");
+          const ours = inst.stateHash(globals, services_);
+          if (!equalBytes(ours, f.payload)) {
+            await rejectMigration(t, 4, "migrated state hash mismatch — refusing to resume");
+          }
+          try {
+            for (const [n, v] of globals) inst.setG(n, v);
+            if (inst.g(G.flag) !== FLAG_UNWOUND || inst.g(G.state) !== STATE_UNWIND ||
+              inst.g(G.entry) < 0 || inst.g(G.entry) >= inst.meta.entries.length) {
+              throw new Error("migrated state is not a suspended entry");
+            }
+            inst.restoreServices(services_);
+          } catch (error) {
+            await rejectMigration(t, 5, `restoring migrated state failed: ${error}`, error);
+          }
+          await t.write(frame(FT.PREPARED));
+          const commit = await readTargetFrame("COMMIT");
+          if (commit.type === FT.ABORT) throw abortError(commit);
+          if (commit.type !== FT.COMMIT) {
+            await rejectMigration(t, 5, `expected COMMIT after PREPARED, got ${commit.type}`);
+          }
+          if (commit.payload.length !== 0) {
+            await rejectMigration(t, 5, "COMMIT must have an empty payload");
+          }
+          instanceLifecycles.get(inst).state = "paused";
 
-        // Receiving COMMIT transfers ownership to this target. Failure to
-        // return COMMIT_OK cannot revoke that transfer: the source has already
-        // retired, so the target must still return to its caller and resume.
-        let commitAckError = null;
-        try {
-          await withDeadline(
-            Promise.resolve().then(() => t.write(frame(FT.COMMIT_OK))),
-            commitAckWriteTimeoutMs,
-            "COMMIT_OK write",
-          );
-        } catch (error) {
-          commitAckError = error instanceof Error ? error.message : String(error);
+          // Receiving COMMIT transfers ownership to this target. Failure to
+          // return COMMIT_OK cannot revoke that transfer: the source has already
+          // retired, so the target must still return to its caller and resume.
+          let commitAckError = null;
+          try {
+            await withDeadline(
+              Promise.resolve().then(() => t.write(frame(FT.COMMIT_OK))),
+              commitAckWriteTimeoutMs,
+              "COMMIT_OK write",
+            );
+          } catch (error) {
+            commitAckError = error instanceof Error ? error.message : String(error);
+          }
+          return { inst, sourceRuntime, commitAckError };
         }
-        return { inst, sourceRuntime, commitAckError };
+        case FT.ABORT:
+          throw abortError(f);
+        default:
+          throw new Error(`unexpected frame ${f.type}`);
       }
-      case FT.ABORT:
-        throw abortError(f);
-      default:
-        throw new Error(`unexpected frame ${f.type}`);
     }
+  } catch (error) {
+    // Partial restore and pre-COMMIT failure never expose a reusable target.
+    if (instanceLifecycles.get(inst).state !== "paused") instanceLifecycles.get(inst).state = "failed";
+    throw error;
   }
 }

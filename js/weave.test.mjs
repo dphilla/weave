@@ -621,11 +621,16 @@ function offerFinalStateMigration(transport, {
   sourceServices = new Map(),
   makeTargetServices = () => new Map(),
   mutateServices = (services) => services,
+  mutateGlobals = (globals) => globals,
   opts = {},
 } = {}) {
-  const { wasm, meta } = minimalWovenModule();
+  // This protocol-only fixture models a held entry. Real stack reconstruction
+  // and execution are covered by weave-lifecycle-migration.test.mjs.
+  const { wasm, meta } = wovenModule({ entries: [{ name: "run", params: [], results: [] }] });
   const sourceInstance = new WeaveInstance(wasm, sourceServices);
-  const globals = FIXED_CONTROLS.map((name) => [name, 0]);
+  const globals = mutateGlobals(FIXED_CONTROLS.map((name) => [name,
+    name === "__weave_flag" || name === "__weave_state" ? 1 : 0,
+  ]));
   const services = mutateServices(sourceInstance.serviceBlobs().map(
     ([name, blob]) => [name, blob.slice()],
   ));
@@ -660,6 +665,19 @@ function offerFinalStateMigration(transport, {
 function offerEmptyMigration(transport, opts = {}) {
   return offerFinalStateMigration(transport, { opts });
 }
+
+test("target rejects non-suspended execution state before PREPARED", async () => {
+  for (const control of ["__weave_flag", "__weave_state", "__weave_entry"]) {
+    const transport = new PushTransport();
+    const accepting = offerFinalStateMigration(transport, {
+      mutateGlobals: (globals) => globals.map(([name, value]) => [
+        name, name === control ? (control === "__weave_entry" ? 99 : 0) : value,
+      ]),
+    });
+    await assert.rejects(accepting, /not a suspended entry/);
+    assert.ok(!transport.writes.some((bytes) => bytes[0] === FT.PREPARED));
+  }
+});
 
 test("target canonicalizes non-BMP service names by UTF-8 bytes", async () => {
   const names = ["\u{10000}", "\uE000"];
@@ -712,6 +730,8 @@ function finalOnlyMigration(transport, opts = {}) {
     stateHash: () => new Uint8Array(32),
   };
   const migration = new SourceMigration(transport, instance, "test", opts);
+  // Isolate final-copy framing after a simulated successful handshake.
+  migration._phase = "precopy";
   migration.syncLayout = async () => {};
   return migration;
 }

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3f0e8">
+  <meta name="description" content="One living WebAssembly computation. Six browser tabs. Watch Weave move the running program, not restart it.">
+  <title>π, in transit — Weave</title>
+  <link id="tab-favicon" rel="icon" type="image/svg+xml" sizes="any" data-status="controller" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='7' fill='%23304254'/%3E%3Cpath d='M8 8h6v6H8zm10 0h6v6h-6zM8 18h6v6H8zm10 0h6v6h-6z' fill='white'/%3E%3C/svg%3E">
+  <style>/*__STYLE__*/</style>
+</head>
+<body>
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="wordmark" href="https://github.com/dphilla/weave" target="_blank" rel="noopener noreferrer" aria-label="Weave on GitHub (opens a new tab)"><svg width="25" height="27" viewBox="0 0 25 27" fill="none" aria-hidden="true"><path d="M2 4v12c0 11 10 11 10 0V4m0 0v12c0 11 11 11 11 0V4M2 10h21M2 16h21" stroke="currentColor" stroke-width="2.3"/></svg><span>weave</span><span class="header-tag">LIVE COMPUTE LAB</span></a>
+      <div class="header-right"><span class="connection-indicator" id="connection-indicator"><i></i>Local browser experiment</span><a class="text-link" href="https://github.com/dphilla/weave" target="_blank" rel="noopener noreferrer">View the source <span aria-hidden="true">↗</span></a></div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy"><div class="eyebrow"><span class="tiny-cross">✳</span> THE PROGRAM MOVES. THE PROGRESS STAYS.</div><h1 id="hero-title">π, <em>in transit.</em></h1><p class="hero-description" id="hero-description">One calculation. Six browser tabs. Watch a running WebAssembly program move from tab to tab—carrying its memory, call stack, and place in the calculation with it.</p><div class="hero-meta"><span><i class="dot green"></i>Real Wasm, not a replay</span><span>No backend required</span><span>Open source</span></div></div>
+        <div class="hero-side"><span class="edition">EXPERIMENT 001</span><div class="hero-equation" aria-label="Pi equals the sum of eight divided by four k plus one times four k plus three"><span>π =</span><span class="summation">∑<small>k ≥ 0</small></span><span class="fraction"><span>8</span><span>(4k + 1)(4k + 3)</span></span></div><p>The infinite series continues.<br>The machine running it can change.</p></div>
+      </section>
+
+      <div id="compatibility" class="notice error" role="alert" hidden></div>
+      <div id="warning" class="notice" role="status" hidden></div>
+
+      <section class="lab" aria-label="Live computation and migration">
+        <div class="lab-heading"><div class="section-label"><span class="live-dot" id="live-dot"></span><span id="lab-label">THE LIVE EXPERIMENT</span></div><span class="protocol-label" id="transport-label">WASM → TAB STREAM → WASM</span></div>
+        <div class="tab-bar-hint"><strong>Watch your browser’s tab bar.</strong><span><i class="tab-key running" aria-hidden="true">▶</i>RUNNING π</span><span><i class="tab-key moving" aria-hidden="true">→</i>Moving</span><span><i class="tab-key waiting" aria-hidden="true">1</i>Ready / moved</span></div>
+        <div class="controls" id="controller-controls"><div class="primary-controls"><button id="open-tabs" class="button primary">Open 6 compute tabs <span aria-hidden="true">↗</span></button><button id="open-next" class="button secondary" hidden>Open next tab <span aria-hidden="true">↗</span></button><button id="start-compute" class="button primary" disabled>Start calculating <span aria-hidden="true">→</span></button><button id="migrate-next" class="button primary" disabled>Move to the next tab <span aria-hidden="true">→</span></button></div><div class="tour-controls"><label class="transport-control"><span>TRANSPORT</span><select id="transport-mode" aria-label="Migration transport"><option value="local">Same-browser · no setup</option><option value="webrtc">WebRTC · network dependent</option></select></label><button id="auto-tour" class="button secondary" aria-pressed="false" disabled><span class="tour-dot"></span>Auto tour</button><button id="stop-compute" class="button quiet" disabled>Stop demo</button></div></div>
+        <div class="lab-top">
+          <div class="computation">
+            <div class="metric-overline"><span>CURRENT APPROXIMATION</span><span class="owner-pill" id="owner-label">Waiting to begin</span></div>
+            <div class="pi-value" id="pi-value" aria-label="Current pi estimate">3.<span class="muted">────────────</span></div>
+            <div class="reference">REFERENCE <span>3.141592653589793…</span></div>
+            <div class="metric-grid"><div><span class="metric-number" id="terms">0</span><span class="metric-caption">series terms evaluated</span></div><div><span class="metric-number" id="handoffs">0</span><span class="metric-caption">confirmed handoffs</span></div><div><span class="metric-number" id="gap">—</span><span class="metric-caption">gap to the reference</span></div></div>
+            <div class="chart-wrap"><div class="chart-heading"><span>CONVERGENCE, WITHOUT A RESTART</span><span id="chart-caption">Waiting for Wasm progress</span></div><canvas id="convergence" height="94" aria-label="Pi estimate error plotted over observed progress; migration boundaries marked"></canvas><div class="chart-footer"><span>More terms → smaller error</span><span class="chart-key"><i></i> live migration</span></div></div>
+          </div>
+          <div class="explanation">
+            <span class="section-label">WHAT’S HAPPENING</span><h2 id="phase-title">A program needs<br>a place to run.</h2><p id="phase-description">Open six compute tabs, then start the calculation. This dashboard watches; only one compute tab will own the running workload.</p>
+            <ol class="phase-list"><li data-phase="running"><span>01</span><div><strong>Compute</strong><small>Wasm keeps the running sum and live locals.</small></div></li><li data-phase="precopy"><span>02</span><div><strong>Move the state</strong><small id="copy-description">Weave transfers real execution state between tabs.</small></div></li><li data-phase="committed"><span>03</span><div><strong>Pick up where it left off</strong><small>The old copy retires. The next tab resumes.</small></div></li></ol>
+            <div class="proof" id="proof"><span class="proof-icon" aria-hidden="true">↳</span><div><strong id="proof-title">Same computation. New address.</strong><span id="proof-detail">No new calculation is started during a handoff.</span></div></div>
+          </div>
+        </div>
+
+        <div class="fleet-heading"><div><span class="section-label" id="fleet-label">SIX PLACES. ONE LIVING PROGRAM.</span><span class="fleet-helper" id="fleet-helper">Your browser tabs are the machines.</span></div><span class="fleet-count" id="fleet-count">0 / 6 connected</span></div>
+        <div class="fleet" id="fleet" aria-label="Six compute nodes"></div>
+
+        <div id="worker-controls" class="worker-controls" hidden><span id="worker-guidance">This is a compute tab. Keep it open and return to the dashboard to control the journey.</span><button id="back-dashboard" class="button secondary">Back to dashboard <span aria-hidden="true">↗</span></button></div>
+        <div class="setup-note" id="setup-note">Opens six new tabs. Keep this dashboard open. If your browser blocks them, allow pop-ups for this site or use “Open next tab.”</div>
+      </section>
+
+      <section class="below-lab"><div class="activity"><div class="activity-heading"><h2>The handoff log</h2><span>OBSERVED, NOT SIMULATED</span></div><ol id="event-log" class="event-log"><li class="empty-log">Start the experiment to see the journey unfold.</li></ol><details class="technical-details"><summary>What actually moves?</summary><p>The woven Wasm module captures its live call stack and locals into linear memory. Weave transfers memory pages, control globals, and the progress service’s state, then verifies and commits the handoff. The destination resumes the suspended entry; it does not start a new π calculation.</p><p>Digits are ordinary floating-point estimates from a Kahan-compensated series, not an arbitrary-precision π record. Progress and error are real observations; the chart and motion are explanatory visualization.</p><dl><dt>Workload</dt><dd>Paired Leibniz series · i64 counter / f64 arithmetic</dd><dt>Data path</dt><dd id="data-path">Bounded browser-tab byte stream over BroadcastChannel</dd><dt>Coordination</dt><dd>Same-origin BroadcastChannel · no signaling server</dd><dt>Module SHA-256</dt><dd id="module-hash">Loading…</dd><dt>Module size</dt><dd id="module-size">Loading…</dd></dl></details></div>
+        <aside class="cta-card"><span class="eyebrow">THESE TABS ARE JUST THE BEGINNING.</span><h2>Imagine the tabs<br>are <em>machines.</em></h2><p>The same Weave migration protocol works across supported runtimes on servers and bare-metal hosts—and between a server and a browser using a transport bridge.</p><div class="runtime-list"><span>Wasmtime</span><span>V8 / browsers</span><span>wazero</span><span>WAMR</span></div><a class="button repo-button" href="https://github.com/dphilla/weave" target="_blank" rel="noopener noreferrer">Explore Weave on GitHub <span aria-hidden="true">↗</span></a><p class="cta-footnote">Portable Wasm workloads, not arbitrary processes.<br>Cross-machine use requires compatible host services and a suitable network transport.</p></aside>
+      </section>
+      <section class="reality-note"><strong>A small, honest lab.</strong><p>Six tabs are six independent execution environments—not six separate computers. The default tab transport is entirely local; optional WebRTC exercises the network transport and depends on working local ICE connectivity. Both use the unchanged Weave migration engine. No STUN, TURN, account, or backend is configured. Background tabs can be throttled or discarded. If an owning tab disappears, the demo stops guessing: it will not silently restart the workload.</p></section>
+    </main>
+    <footer><span>WEAVE / LIVE MIGRATION FOR WEBASSEMBLY</span><div><a href="https://github.com/dphilla/weave" target="_blank" rel="noopener noreferrer">Source ↗</a><button id="download-log" class="text-button">Download session log</button><button id="show-license" class="text-button">Apache 2.0</button></div></footer>
+  </div>
+  <dialog id="license-dialog"><h2>Open-source notices</h2><pre id="license-text">/*__LICENSE__*/</pre><form method="dialog"><button class="button primary">Close</button></form></dialog>
+  <noscript><p class="notice error">This demo needs JavaScript to run WebAssembly and coordinate the compute tabs.</p></noscript>
+  <script id="weave-workload" type="application/json">/*__WORKLOAD__*/</script>
+  <script type="importmap">/*__IMPORTMAP__*/</script>
+  <script type="module">import { mount } from "weave-demo:app"; mount().catch(error => { const box = document.querySelector('#compatibility'); box.hidden = false; box.textContent = 'The demo could not start: ' + error.message + '. Open this page directly over HTTPS or localhost, using a current desktop browser.'; });</script>
+</body>
+</html>

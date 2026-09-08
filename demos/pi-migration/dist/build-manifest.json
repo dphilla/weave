@@ -1,0 +1,16 @@
+{
+  "htmlSha256": "a925e7f4095c6c617500f268d082d7046658faf703dc6778f3963989216cc7a5",
+  "htmlBytes": 339956,
+  "sha256": "625677af70b6054a1eb2baac406b3b2f47cf2ce6a47ae3546d6367b6274f6234",
+  "bytes": 2156,
+  "sources": {
+    "js/weave.mjs": "a826df6357c536989fe5e913129f96d4a89c95045308100ded1c9458483c5a9f",
+    "js/weave-browser.mjs": "8218837bb28828c18aef1a2a243a53b46b869aedb9afe0480697e5b039ccaf42",
+    "packages/browser-transports/src/index.mjs": "7bd35b2787bb6664d50fe3028a7302cb2c1a30cbd245753d353b03d78a1e58e5",
+    "packages/webrtc-session/src/index.mjs": "da815a50aa7ca6978abe3015a019e72c1f5d97d8fc9a8191c3ea7a811ee44f7a",
+    "demos/pi-migration/runtime.mjs": "9355d568ae06d117d28ad9fc0701df188596905a5e555c5b03a588bdb48d5e01",
+    "demos/pi-migration/tab-stream.mjs": "1c6b71937859444491e27fa5e004d58c2851a14c5119657668a39663589336c5",
+    "demos/pi-migration/tab-indicator.mjs": "5060bd6a20a472bf53df1d49f67f3e2b2fa7ebf26980ade392fd5da9d97ba0ab",
+    "demos/pi-migration/app.mjs": "c1514fc104066c9a8c9e96a8cacb78c5df54f4465e10b73f5160c8116d537e5f"
+  }
+}

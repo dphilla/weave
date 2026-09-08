@@ -121,6 +121,11 @@ The authenticated rendezvous wire contract and its human/agent consumption
 model are documented separately in [`docs/RENDEZVOUS.md`](docs/RENDEZVOUS.md)
 and [`docs/RENDEZVOUS_CONSUMPTION.md`](docs/RENDEZVOUS_CONSUMPTION.md).
 
+For a no-setup presentation, the
+[`single-file π migration lab`](demos/pi-migration/README.md) moves a real Wasm
+calculation through six browser tabs. Upload its one HTML file to a static
+HTTPS host; no backend or STUN/TURN server is required in its default local mode.
+
 For a real browser round trip, continue with the
 [`browser ↔ browser WebRTC demo`](demos/browser-webrtc/README.md) or the
 [`browser ↔ native sidecar demo`](demos/browser-sidecar/README.md). The

@@ -367,3 +367,147 @@ test("AbortSignal fails pending operations and closes both transports", async ()
   await assert.rejects(dataChannelOpened, { name: "AbortError" });
   assert.equal(channel.readyState, "closed");
 });
+
+const writeAdapters = [
+  ["WebSocket", FakeWebSocket, WebSocketByteStream],
+  ["RTCDataChannel", FakeDataChannel, RTCDataChannelByteStream],
+];
+const writeInputs = [
+  ["ArrayBuffer", (size) => new ArrayBuffer(size)],
+  ["Uint8Array subview", (size) => new Uint8Array(new ArrayBuffer(16), 3, size)],
+  ["Uint16Array subview", (size) => new Uint16Array(new ArrayBuffer(16), 2, size / 2)],
+  ["DataView subview", (size) => new DataView(new ArrayBuffer(16), 3, size)],
+  ["Buffer subview", (size) => Buffer.alloc(16).subarray(3, 3 + size)],
+];
+
+for (const [name, Endpoint, Adapter] of writeAdapters) {
+  test(`${name} rejects oversized writes before copying any payload`, async (t) => {
+    for (const [inputName, makeInput] of writeInputs) {
+      await t.test(inputName, async () => {
+        const endpoint = new Endpoint();
+        const stream = new Adapter(endpoint, { maxWriteBytes: 4 });
+        endpoint.open();
+        await stream.opened;
+        try {
+          const input = makeInput(6);
+          const byteSlice = Uint8Array.prototype.slice;
+          const bufferSlice = ArrayBuffer.prototype.slice;
+          let copies = 0;
+          let writing;
+          // Observe only the synchronous write call, using six bytes rather
+          // than allocating a large payload. Restore before any await.
+          Uint8Array.prototype.slice = function (...args) {
+            copies++;
+            return byteSlice.apply(this, args);
+          };
+          ArrayBuffer.prototype.slice = function (...args) {
+            copies++;
+            return bufferSlice.apply(this, args);
+          };
+          try { writing = stream.write(input); }
+          finally {
+            Uint8Array.prototype.slice = byteSlice;
+            ArrayBuffer.prototype.slice = bufferSlice;
+          }
+          await assert.rejects(writing, /write exceeds 4 byte limit/);
+          assert.equal(copies, 0, "an over-limit payload must not be copied");
+          assert.deepEqual(endpoint.sent, []);
+          assert.equal(stream.error, null);
+          await stream.write(Uint8Array.of(9));
+          assert.deepEqual(endpoint.sent.map((part) => [...part]), [[9]]);
+        } finally { await stream.close(); }
+      });
+    }
+  });
+
+  test(`${name} accepts byte-length limits and copies subviews before returning`, async (t) => {
+    for (const [inputName, makeInput] of writeInputs) {
+      await t.test(inputName, async () => {
+        const endpoint = new Endpoint();
+        const stream = new Adapter(endpoint, { maxWriteBytes: 4 });
+        endpoint.open();
+        await stream.opened;
+        try {
+          const input = makeInput(4);
+          const bytes = ArrayBuffer.isView(input)
+            ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
+            : new Uint8Array(input);
+          bytes.set([1, 2, 3, 4]);
+          const writing = stream.write(input);
+          bytes.fill(0);
+          await writing;
+          assert.deepEqual(endpoint.sent.map((part) => [...part]), [[1, 2, 3, 4]]);
+        } finally { await stream.close(); }
+      });
+    }
+  });
+
+  test(`${name} invalid write inputs do not poison subsequent valid writes`, async () => {
+    const endpoint = new Endpoint();
+    const stream = new Adapter(endpoint, { maxWriteBytes: 4 });
+    endpoint.open();
+    await stream.opened;
+    try {
+      for (const input of [null, undefined, "bytes", [1, 2], { byteLength: 2 }]) {
+        await assert.rejects(stream.write(input), /expects an ArrayBuffer or typed array/);
+      }
+      assert.equal(stream.error, null);
+      await stream.write(Uint8Array.of(1, 2));
+      assert.deepEqual(endpoint.sent.map((part) => [...part]), [[1, 2]]);
+    } finally { await stream.close(); }
+  });
+}
+
+test("RTC empty writes succeed while open without sending a message", async () => {
+  const channel = new FakeDataChannel();
+  const stream = new RTCDataChannelByteStream(channel);
+  channel.open();
+  await stream.opened;
+  try {
+    await stream.write(new Uint8Array());
+    assert.deepEqual(channel.sent, []);
+    assert.equal(stream.error, null);
+  } finally { await stream.close(); }
+});
+
+test("RTC empty writes reject the same terminal error after close, abort, or failure", async (t) => {
+  for (const action of ["local close", "remote close", "abort", "error"]) {
+    await t.test(action, async () => {
+      const controller = new AbortController();
+      const channel = new FakeDataChannel();
+      const stream = new RTCDataChannelByteStream(channel, { signal: controller.signal });
+      channel.open();
+      await stream.opened;
+      try {
+        if (action === "local close") await stream.close();
+        else if (action === "remote close") channel.close();
+        else if (action === "abort") controller.abort();
+        else channel.emit("error", { error: new Error("injected channel failure") });
+        const { error } = await stream.closed;
+        assert.ok(error instanceof Error);
+        await assert.rejects(stream.write(new Uint8Array()), (actual) => actual === error);
+        await assert.rejects(stream.write(Uint8Array.of(1)), (actual) => actual === error);
+        assert.deepEqual(channel.sent, []);
+      } finally { await stream.close(); }
+    });
+  }
+});
+
+test("RTC queued empty writes reject when an earlier queued write fails", async () => {
+  const channel = new FakeDataChannel();
+  const stream = new RTCDataChannelByteStream(channel);
+  channel.open();
+  await stream.opened;
+  const failure = new Error("injected send failure");
+  channel.send = () => { throw failure; };
+  try {
+    const first = stream.write(Uint8Array.of(1));
+    const empty = stream.write(new Uint8Array());
+    await Promise.all([
+      assert.rejects(first, (error) => error === failure),
+      assert.rejects(empty, (error) => error === failure),
+    ]);
+    assert.equal(stream.error, failure);
+    assert.deepEqual(channel.sent, []);
+  } finally { await stream.close(); }
+});

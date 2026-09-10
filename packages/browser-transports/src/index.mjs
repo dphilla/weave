@@ -29,13 +29,21 @@ function abortError() {
   return error;
 }
 
-function copyBytes(value) {
-  if (value instanceof Uint8Array) return value.slice();
+function copyBytes(value, maxWriteBytes, transport) {
+  let bytes;
   if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  } else if (value instanceof ArrayBuffer) {
+    bytes = new Uint8Array(value);
+  } else {
+    throw new TypeError("byte-stream write expects an ArrayBuffer or typed array");
   }
-  if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
-  throw new TypeError("byte-stream write expects an ArrayBuffer or typed array");
+  // Inspect a view first: an oversized write must not allocate a payload copy.
+  if (bytes.byteLength > maxWriteBytes) {
+    throw new RangeError(`${transport} write exceeds ${maxWriteBytes} byte limit`);
+  }
+  // Normalize views before slicing so Buffer.slice cannot retain caller memory.
+  return bytes.slice();
 }
 
 async function messageBytes(value) {
@@ -292,16 +300,10 @@ export class WebSocketByteStream {
   write(value) {
     let bytes;
     try {
-      bytes = copyBytes(value);
+      bytes = copyBytes(value, this.maxWriteBytes, "WebSocket");
     } catch (error) {
       return Promise.reject(error);
     }
-    if (bytes.length > this.maxWriteBytes) {
-      return Promise.reject(new RangeError(
-        `WebSocket write exceeds ${this.maxWriteBytes} byte limit`,
-      ));
-    }
-
     const operation = this._writeTail.then(async () => {
       await this.opened;
       this._throwIfUnwritable();
@@ -627,19 +629,14 @@ export class RTCDataChannelByteStream {
   write(value) {
     let bytes;
     try {
-      bytes = copyBytes(value);
+      bytes = copyBytes(value, this.maxWriteBytes, "RTCDataChannel");
     } catch (error) {
       return Promise.reject(error);
     }
-    if (bytes.length > this.maxWriteBytes) {
-      return Promise.reject(new RangeError(
-        `RTCDataChannel write exceeds ${this.maxWriteBytes} byte limit`,
-      ));
-    }
-
     const operation = this._writeTail
       .then(async () => {
         await this.opened;
+        this._throwIfUnwritable();
         for (let offset = 0; offset < bytes.length; offset += this.maxChunkBytes) {
           this._throwIfUnwritable();
           await this._waitForDrain(this.highWaterMark);

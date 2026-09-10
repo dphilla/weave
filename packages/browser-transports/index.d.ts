@@ -38,7 +38,7 @@ export interface ExactByteStream {
 export interface ByteStreamOptions {
   /** Maximum unread inbound bytes. Defaults to 72 MiB. */
   maxBufferedBytes?: number;
-  /** Maximum bytes accepted by one logical write. Defaults to 64 MiB. */
+  /** Maximum bytes per logical write, checked before copying input. Defaults to 64 MiB. */
   maxWriteBytes?: number;
   /** Output bufferedAmount threshold. Defaults to 1 MiB. */
   highWaterMark?: number;

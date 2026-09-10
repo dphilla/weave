@@ -116,6 +116,11 @@ The receive limit is checked before new data is made available to readers.
 `maxBufferedBytes`, because such a read can never be satisfied without
 violating the configured bound.
 
+The write limit is checked against the input's byte length before copying its
+payload. Accepted writes copy the bytes synchronously, so callers may reuse or
+mutate their input immediately after calling `write`. An empty DataChannel
+write sends no message, but still requires an open, writable channel.
+
 `AbortSignal` can govern the lifetime of either adapter. Aborting fails pending
 operations with `AbortError` and closes the underlying transport.
 

@@ -36,7 +36,7 @@ in [`demos/browser-wamr`](demos/browser-wamr/). The generic native WebRTC
 sidecar and its Browser ↔ Wasmtime round trip live in
 [`demos/browser-sidecar`](demos/browser-sidecar/).
 
-## How is that possible?
+## How is this possible?
 
 Wasm runtimes expose no way to read a live execution stack, and every engine
 represents it differently — so Weave doesn't ask them to. Instead,

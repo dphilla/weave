@@ -34,6 +34,7 @@ run_rust_quality() {
 }
 
 run_js() {
+  NODE_BIN="$NODE_BIN" bash .github/ci/pi-demo-smoke.test.sh
   "$NODE_BIN" --test js/*.test.mjs demos/*/*.test.mjs packages/*/test/*.test.mjs
   NODE_BIN="$NODE_BIN" .github/ci/package-smoke.sh
 }
@@ -80,7 +81,7 @@ case "${1:-}" in
   all)
     run_rust_quality
     run_rust
-    run_js
+    WEAVE_PI_REQUIRE_CLI=1 run_js
     run_go
     ;;
   -h|--help) usage ;;

@@ -40,6 +40,10 @@ printf 'PASS shell syntax (%s scripts)\n' "$shell_scripts"
   printf '%s\n' '.github/ci/browser-sidecar-smoke.sh must be executable' >&2
   exit 1
 }
+[[ -x .github/ci/pi-demo-smoke.sh ]] || {
+  printf '%s\n' '.github/ci/pi-demo-smoke.sh must be executable' >&2
+  exit 1
+}
 [[ -r .github/ci/awake-guard.sh ]] || {
   printf '%s\n' '.github/ci/awake-guard.sh must be readable' >&2
   exit 1

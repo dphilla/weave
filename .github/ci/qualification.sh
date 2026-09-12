@@ -21,7 +21,7 @@ unset WEAVE_CI_ARTIFACT_DIR
 
 .github/ci/run-unit.sh rust-quality
 .github/ci/run-unit.sh rust
-.github/ci/run-unit.sh js
+WEAVE_PI_REQUIRE_CLI=1 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
 .github/ci/run-wamr.sh
 .github/ci/check-workflows.sh
@@ -46,6 +46,8 @@ WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/browser-peer" \
   .github/ci/browser-peer-smoke.sh
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/browser-sidecar" \
   .github/ci/browser-sidecar-smoke.sh
+WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/pi-demo" \
+  .github/ci/pi-demo-smoke.sh
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/adversity" \
   .github/ci/adversity.sh all
 WEAVE_CI_ARTIFACT_DIR="$ARTIFACT_ROOT/host-service-baseline" \

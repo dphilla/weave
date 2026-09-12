@@ -42,6 +42,8 @@ Cargo behavior unless the caller sets that variable too.
 | `browser-smoke.sh` | Required Chrome → WAMR → Chrome → WAMR smoke |
 | `browser-peer-smoke.sh` | Required Chrome A → B → A WebRTC smoke with local signaling/STUN |
 | `browser-sidecar-smoke.sh` | Required Chrome → generic Pion sidecar → Wasmtime → Chrome smoke |
+| `pi-demo-smoke.sh` | Fresh Cargo compiler → single-file Pi HTML → real Chrome local and WebRTC migrations |
+| `pi-demo-smoke.test.sh` | Isolated compiler provenance, packaging, browser invocation, failure, and retention checks (JavaScript lane) |
 | `wamr-fixture.sh` | Multiple-memory Wasmtime → WAMR → Wasmtime chain |
 | `adversity.sh` | Protocol failure tests and repeated migration thresholds |
 | `host-service-baseline.sh` | Current built-in host-service behavior tests |
@@ -187,6 +189,8 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-peer-artifacts \
   .github/ci/browser-peer-smoke.sh
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-browser-sidecar-artifacts \
   .github/ci/browser-sidecar-smoke.sh
+WEAVE_CI_ARTIFACT_DIR=/tmp/weave-pi-artifacts \
+  .github/ci/pi-demo-smoke.sh
 ```
 
 Missing browser prerequisites are failures in this wrapper. The underlying
@@ -195,6 +199,48 @@ Set `CHROME_BIN` when Chrome/Chromium is outside the usual system locations;
 the resolved executable and version are recorded in `versions.txt`. Central
 scripts that invoke Node honor `NODE_BIN=/absolute/path/to/node`, which is
 useful when a version manager does not put Node on the non-interactive PATH.
+
+### Fresh deployable Pi demo
+
+`pi-demo-smoke.sh` always builds `weave-cli` with the locked Cargo dependencies,
+reads the executable path from Cargo's compiler-artifact JSON, and packages
+current sources with that exact compiler. It honors Cargo's relocated output,
+including configuration-driven paths; inherited `WEAVE_BIN`, `WEAVE_PI_WASM`,
+and fixture overrides cannot replace the compiler or guest in this lane.
+The generated HTML lives under the artifact directory, outside the checkout;
+the wrapper refuses checkout-local artifact directories and leaves the tracked
+`demos/pi-migration/dist` untouched. Use a fresh artifact directory: an existing
+`dist` directory or symlink is refused, not overwritten or reused. Both browser runs serve this generated HTML,
+not a checked-in snapshot. No remote signaling, STUN, or TURN server is needed.
+
+```sh
+# Same short local + literal-ICE WebRTC checks as pull requests.
+.github/ci/pi-demo-smoke.sh --quick
+# Same full local recovery checks and six-minute hidden/offline soak as nightly.
+.github/ci/pi-demo-smoke.sh --soak-ms 370000
+# Hermetic orchestration regressions: Node required, no Rust/Chrome/downloads.
+bash .github/ci/pi-demo-smoke.test.sh
+```
+
+PR runs both transports in quick mode. Main and release qualification run the
+full local scenario (including recovery) plus quick WebRTC. Nightly adds the
+370-second hidden/offline local soak. Missing Node 22+, Chrome, or a successful
+compiler/build/browser result fails the lane; it is not an optional skip.
+Each workflow uploads the tested `dist/index.html`, manifest, Cargo output,
+versions/provenance, browser results, and screenshots, including on failure.
+These jobs only test and upload diagnostics; they do not publish a site.
+Because release qualification includes this lane, its
+`WEAVE_CI_ARTIFACT_DIR` must also be outside the checkout. Qualification's
+default temporary directory and the hosted workflow paths already satisfy
+this; use a fresh `/tmp/...` directory for a retained local qualification run.
+
+The ordinary Pi guest tests select `WEAVE_BIN`, then
+`CARGO_TARGET_DIR/release/weave`, then checkout-local `target/release/weave`
+(the last choice is used only when no target directory is specified).
+JavaScript-only tests retain a source/hash-checked fixture when no CLI exists.
+`run-unit.sh all` and release qualification set `WEAVE_PI_REQUIRE_CLI=1` for the
+JavaScript tests: missing compilers and fixture/byte overrides then fail instead
+of silently avoiding a fresh transformation.
 
 ## Conformance suites
 
@@ -268,6 +314,8 @@ The PR-required lanes are:
 - Root Rust tests and release build.
 - Rust formatting and warning-free Clippy.
 - JavaScript core, transport, relay, and browser-smoke unit tests.
+- Fresh single-file Pi packaging and six-tab Chrome migration over both local
+  BroadcastChannel and literal-ICE WebRTC transports.
 - Go format, vet, tests, and a non-source-tree build.
 - The six-case representative migration suite, including the advertised
   three-runtime server demo route.

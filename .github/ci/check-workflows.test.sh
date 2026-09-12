@@ -47,7 +47,7 @@ new_fixture() {
 
   local script
   for script in .github/ci/000-first.sh .github/ci/package-smoke.sh \
-    .github/ci/semantic-conformance.sh .github/ci/browser-sidecar-smoke.sh \
+    .github/ci/semantic-conformance.sh .github/ci/browser-sidecar-smoke.sh .github/ci/pi-demo-smoke.sh \
     .github/ci/awake-guard.sh .github/ci/wait-for.sh \
     demos/aaa-syntax/000-first.sh demos/browser-sidecar/run.sh \
     scripts/000-first.sh scripts/cleanup.sh; do

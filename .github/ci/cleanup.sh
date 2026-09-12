@@ -205,6 +205,7 @@ is_allowlisted_temp_name() {
     weave-browser-peer-?* | \
     weave-browser-sidecar.?* | \
     weave-browser-smoke.?* | \
+    weave-pi-demo.?* | \
     weave-checkpoint.?* | \
     weave-native-e2e.?* | \
     weave-semantic-conformance.?* | \

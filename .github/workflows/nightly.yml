@@ -21,6 +21,31 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  pi-demo:
+    name: Fresh Pi demo hidden-tab soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/ci/setup
+        with:
+          rust: "true"
+          node: "true"
+      - name: Exercise offline background computation and both transports
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/pi-demo
+        run: .github/ci/pi-demo-smoke.sh --soak-ms 370000
+      - name: Upload tested HTML and browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-pi-demo-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/weave-ci/pi-demo
+          if-no-files-found: warn
+          retention-days: 30
+
   protocol:
     name: Protocol failure-path tests
     runs-on: ubuntu-24.04

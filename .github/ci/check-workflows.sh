@@ -10,9 +10,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/.github/ci/versions.env"
 cd "$ROOT"
 
-bash -n .github/ci/*.sh
-bash -n demos/*/*.sh
-bash -n scripts/*.sh
+# bash -n accepts one script; additional arguments are that script's argv.
+shell_scripts=0
+for script in .github/ci/*.sh demos/*/*.sh scripts/*.sh; do
+  if ! bash -n "$script"; then
+    printf 'shell syntax check failed: %s\n' "$script" >&2
+    exit 1
+  fi
+  shell_scripts=$((shell_scripts + 1))
+done
+printf 'PASS shell syntax (%s scripts)\n' "$shell_scripts"
 [[ -x demos/server-chain/run.sh ]] || {
   printf '%s\n' 'demos/server-chain/run.sh must be executable' >&2
   exit 1
@@ -50,6 +57,7 @@ grep -Fxq 'unset WEAVE_CI_ARTIFACT_DIR' .github/ci/qualification.sh || {
   exit 1
 }
 
+bash .github/ci/check-workflows.test.sh
 .github/ci/artifact-lifecycle.test.sh
 .github/ci/cleanup.test.sh
 .github/ci/awake-guard.test.sh
@@ -63,8 +71,25 @@ server_chain_list="$(demos/server-chain/run.sh --list)"
 }
 
 pin_failures=0
+pin_references=0
+# Check block-style mapping and sequence entries, including composite actions.
+# Capture grep's status: process substitution would hide file-read failures.
+scan_status=0
+use_lines="$(grep -nH -E '^[[:space:]]*(-[[:space:]]+)?uses:' \
+  .github/workflows/*.yml .github/ci/setup/action.yml)" || scan_status=$?
+if [[ "$scan_status" -gt 1 ]]; then
+  printf '%s\n' 'failed to scan workflow action references' >&2
+  exit 1
+fi
 while IFS= read -r use_line; do
-  reference="$(printf '%s\n' "$use_line" | sed -E 's/^.*uses:[[:space:]]*([^[:space:]#]+).*$/\1/')"
+  [[ -n "$use_line" ]] || continue
+  pin_references=$((pin_references + 1))
+  # Remove grep's file:line prefix, then parse only the leading uses value.
+  # A later "uses:" inside a comment must not override an unpinned reference.
+  reference="${use_line#*:}"
+  reference="${reference#*:}"
+  reference="$(printf '%s\n' "$reference" | sed -nE \
+    "s/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*['\"]?([^[:space:]#'\"]+).*$/\\2/p")"
   case "$reference" in
     ./*) continue ;;
   esac
@@ -72,8 +97,9 @@ while IFS= read -r use_line; do
     printf 'external action is not immutable-SHA pinned: %s\n' "$use_line" >&2
     pin_failures=$((pin_failures + 1))
   fi
-done < <(grep -nH -E '^[[:space:]]*uses:' .github/workflows/*.yml .github/ci/setup/action.yml)
+done <<< "$use_lines"
 ((pin_failures == 0)) || exit 1
+printf 'PASS action pins (%s references)\n' "$pin_references"
 
 if command -v actionlint >/dev/null 2>&1; then
   actionlint

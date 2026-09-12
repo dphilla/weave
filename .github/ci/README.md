@@ -48,7 +48,8 @@ Cargo behavior unless the caller sets that variable too.
 | `spec-corpus.sh` | Weekly official WebAssembly testsuite transformer smoke |
 | `spec-corpus.test.sh` | Corpus classification regression checks with deterministic fake tools |
 | `qualification.sh` | Deterministic, non-publishing runtime qualification composition |
-| `check-workflows.sh` | Shell syntax, cleanup safety tests, and pinned actionlint validation |
+| `check-workflows.sh` | Per-file shell syntax, action SHA pins, CI harness tests, and pinned actionlint validation |
+| `check-workflows.test.sh` | Isolated valid/broken repositories proving syntax and action-pin checks reject regressions |
 
 Each script supports `--help` where it has options. Scripts use argv arrays,
 finite waits, exact child PIDs, and caller-selected artifact directories. They
@@ -63,6 +64,11 @@ From the repository root:
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
+
+# Validate CI definitions and run the validator's offline regression fixtures.
+bash .github/ci/check-workflows.sh
+# Run just the fixtures, without downloading actionlint or building runtimes.
+bash .github/ci/check-workflows.test.sh
 
 # Human/agent CLI control against all four native adapters and faulty peers.
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-control-check \

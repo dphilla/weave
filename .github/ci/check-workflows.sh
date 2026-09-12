@@ -88,8 +88,15 @@ while IFS= read -r use_line; do
   # A later "uses:" inside a comment must not override an unpinned reference.
   reference="${use_line#*:}"
   reference="${reference#*:}"
-  reference="$(printf '%s\n' "$reference" | sed -nE \
-    "s/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*['\"]?([^[:space:]#'\"]+).*$/\\2/p")"
+  reference="$(printf '%s\n' "$reference" | sed -E \
+    's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//')"
+  # Only surrounding quotes delimit a quoted value. In a plain value, keep
+  # literal # and quote characters: SHA#suffix is not an immutable SHA pin.
+  case "$reference" in
+    \"*) reference="$(printf '%s\n' "$reference" | sed -nE 's/^"([^"]*)"[[:space:]]*(#.*)?$/\1/p')" ;;
+    \'*) reference="$(printf '%s\n' "$reference" | sed -nE "s/^'([^']*)'[[:space:]]*(#.*)?$/\\1/p")" ;;
+    *) reference="${reference%%[[:space:]]*}" ;;
+  esac
   case "$reference" in
     ./*) continue ;;
   esac

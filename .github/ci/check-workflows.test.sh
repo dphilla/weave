@@ -127,7 +127,9 @@ done
 
 for location in .github/workflows/check.yml .github/ci/setup/action.yml; do
   for style in mapping sequence; do
-    for reference in owner/action@v4 owner/action@main owner/action@0123456; do
+    for reference in owner/action@v4 owner/action@main owner/action@0123456 \
+      "owner/action@$SHA#mutable" "'owner/action@$SHA#mutable'" "\"owner/action@$SHA#mutable\"" \
+      "owner/action@$SHA'suffix" "owner/action@$SHA\"suffix"; do
       new_fixture
       write_action "$CASE_ROOT/$location" "$style" "$reference"
       run_fixture "reject $location $style $reference" fail 'external action is not immutable-SHA pinned:'

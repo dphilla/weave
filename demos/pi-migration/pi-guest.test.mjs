@@ -149,7 +149,7 @@ test("JavaScript-only Pi fixture is source-hash guarded and returned bytes are c
 test("fixture-only mode works without Rust and an explicitly missing CLI is not silently hidden", () => {
   const moduleUrl = new URL("./test-fixture.mjs", import.meta.url).href;
   const script = `import { loadPiWasm } from ${JSON.stringify(moduleUrl)}; if (!WebAssembly.validate(loadPiWasm())) throw new Error('invalid fixture');`;
-  const env = { ...process.env, WEAVE_PI_WASM: "", WEAVE_BIN: `/private/tmp/weave-pi-missing-cli-${process.pid}` };
+  const env = { ...process.env, WEAVE_PI_WASM: "", WEAVE_PI_REQUIRE_CLI: "0", WEAVE_BIN: `/private/tmp/weave-pi-missing-cli-${process.pid}` };
   assert.doesNotThrow(() => execFileSync(process.execPath, ["--input-type=module", "-e", script], {
     env: { ...env, WEAVE_PI_USE_FIXTURE: "1" }, stdio: "pipe", timeout: 5000,
   }));

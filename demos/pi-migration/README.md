@@ -155,6 +155,8 @@ node --test demos/pi-migration/*.test.mjs
 node demos/pi-migration/e2e.mjs --artifacts /tmp/weave-pi-check
 node demos/pi-migration/e2e.mjs --headed --artifacts /tmp/weave-pi-visible
 node demos/pi-migration/e2e.mjs --soak-ms 360000 --artifacts /tmp/weave-pi-soak
+# Build and browser-test fresh HTML outside the checkout, just as CI does:
+WEAVE_CI_ARTIFACT_DIR=/tmp/weave-pi-ci .github/ci/pi-demo-smoke.sh
 ```
 
 The guest/runtime tests freshly transform `pi.wat` when a CLI exists. On a
@@ -164,6 +166,23 @@ and Wasm hashes, without skipping the integration tests. Set
 the guest, regenerate it with `node demos/pi-migration/build.mjs
 --update-test-fixture`. An explicitly configured but broken `WEAVE_BIN` is a
 test failure, not permission to silently use the fixture.
+
+Both packaging and guest tests select `WEAVE_BIN` first, otherwise
+`CARGO_TARGET_DIR/release/weave` when that variable is set, otherwise
+`target/release/weave` in the checkout. Relative environment paths are resolved
+from the invoking working directory, before the transformer runs from the
+repository root. A relocated target never falls back to a checkout-local CLI.
+Combined Rust/JavaScript CI requires a compiler with `WEAVE_PI_REQUIRE_CLI=1`;
+that mode rejects missing compilers and fixture/byte overrides.
+
+`node demos/pi-migration/build.mjs --out-dir /tmp/weave-pi-build` writes the HTML,
+Wasm, and manifest elsewhere without changing the tracked `dist` files. Point
+the browser harness at it with `--html /tmp/weave-pi-build/index.html`.
+The CI wrapper above always builds the current CLI and uses Cargo's reported
+executable, packages into its artifact directory, and browser-tests that exact
+HTML over both transports. PR uses quick checks, main/release include local
+recovery checks, and nightly adds a 370-second hidden/offline soak. Downloaded
+CI artifacts include the tested HTML; only that HTML is needed to deploy it.
 
 `WEAVE_BIN` can select another built CLI. `CHROME_BIN` or `--chrome` selects the
 Chrome executable. The browser harness uses Node's built-in DevTools WebSocket

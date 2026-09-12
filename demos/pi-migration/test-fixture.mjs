@@ -3,13 +3,13 @@
 // failing is a test failure, never a reason to hide behind the fixture.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PI_FIXTURE } from "./pi-fixture.mjs";
+import { fileIdentity, REPOSITORY_ROOT, resolvePiCompiler } from "./compiler.mjs";
 
-const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SOURCE = fileURLToPath(new URL("./pi.wat", import.meta.url));
 const PERIOD = 64;
 const STACK_PAGES = 2;
@@ -27,21 +27,30 @@ export function verifyPiFixtureSource(source) {
 
 export function loadPiWasm() {
   const provided = process.env.WEAVE_PI_WASM;
-  const explicitCli = process.env.WEAVE_BIN;
   const forceFixture = process.env.WEAVE_PI_USE_FIXTURE === "1";
-  const key = JSON.stringify([provided, explicitCli, forceFixture]);
+  const requireCli = process.env.WEAVE_PI_REQUIRE_CLI === "1";
+  if (requireCli && (provided || forceFixture)) {
+    throw new Error("WEAVE_PI_REQUIRE_CLI=1 does not allow WEAVE_PI_WASM or WEAVE_PI_USE_FIXTURE=1 overrides");
+  }
+  const providedPath = provided ? resolve(provided) : null;
+  const compiler = providedPath || forceFixture ? null : resolvePiCompiler();
+  const key = JSON.stringify([providedPath, providedPath && fileIdentity(providedPath),
+    forceFixture, requireCli, compiler?.cacheKey, fileIdentity(SOURCE)]);
   if (cached && key === cacheKey) return cached.slice();
   let bytes;
   if (provided) {
-    bytes = new Uint8Array(readFileSync(provided));
+    bytes = new Uint8Array(readFileSync(providedPath));
   } else {
-    const cli = explicitCli ?? join(ROOT, "target/release/weave");
-    if (!forceFixture && (explicitCli !== undefined || existsSync(cli))) {
+    if (requireCli && !compiler.available) {
+      throw new Error(`WEAVE_PI_REQUIRE_CLI=1 requires a fresh compiler; selected compiler is missing: ${compiler.command}`);
+    }
+    if (compiler && (compiler.explicit || compiler.available)) {
       const directory = mkdtempSync(join(tmpdir(), "weave-pi-fixture-"));
       try {
         const output = join(directory, "pi.wasm");
-        execFileSync(cli, ["transform", SOURCE, "-o", output,
-          "--period", String(PERIOD), "--stack-pages", String(STACK_PAGES)], { stdio: "pipe", timeout: 30_000 });
+        execFileSync(compiler.command, ["transform", SOURCE, "-o", output,
+          "--period", String(PERIOD), "--stack-pages", String(STACK_PAGES)],
+        { cwd: REPOSITORY_ROOT, stdio: "pipe", timeout: 30_000 });
         bytes = new Uint8Array(readFileSync(output));
       } finally {
         rmSync(directory, { recursive: true, force: true });

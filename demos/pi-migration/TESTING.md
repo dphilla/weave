@@ -1,4 +1,101 @@
-# Pi demo qualification — 2026-09-07
+# Pi demo qualification
+
+## Fresh-compiler CI qualification — 2026-09-12
+
+This review covers compiler discovery and CI qualification of the freshly built
+single-file demo. It does not change the guest, UI, migration engine, or tracked
+`dist` files. The older artifact reports below remain historical evidence.
+
+### Automated and library-level checks
+
+- The complete updated `.github/ci/run-unit.sh js` entry point passed in both
+  compiler-required and deliberate fixture-only modes: **442 tests passed,
+  zero failed/skipped**, plus all five clean npm archive installation/import
+  checks in each mode.
+- Eleven new tooling tests exercise real child-process calls in isolated
+  checkout copies: compiler precedence, missing/broken/nonexecutable compilers,
+  paths with spaces, relative paths, stale checkout binaries, cache invalidation,
+  fixture guards, deterministic external packaging, argument rejection, and
+  `--update-test-fixture`.
+- Twenty-nine CI-wrapper fixtures passed on both Bash 3.2 and Bash 5.2. Their
+  isolated PATH cannot discover a real Rust compiler. They exercise Cargo JSON
+  provenance, a same-name dependency decoy, ambiguous/missing executables,
+  stale environment overrides, packaging/hash failures, both browser arguments,
+  prerequisite/browser failures, existing/symlinked output, and artifact cleanup
+  or retention. Negative cases require failure; they are not skipped checks.
+- The full workflow gate passed on Bash 3.2 and Bash 5.2, including the 66
+  workflow-validator fixtures, lifecycle/cleanup/awake/wait/corpus tests,
+  immutable action pins, and real actionlint 1.7.7.
+- A real locked, offline release build in an initially empty
+  `/private/tmp/weave-pi-fresh-ci.Yr47Kx/cargo-target` completed successfully.
+  The real guest/runtime suite also passed **32/32** tests through an absolute
+  target path containing spaces, then **32/32** again from a nested working
+  directory with a caller-relative target path.
+
+The first sandboxed full JavaScript run could not bind localhost listeners
+(`EPERM` in 15 server/TCP tests). Both complete entry-point runs above permitted
+loopback listeners and passed; these permission errors were not suppressed.
+
+### Real browser/UI checks
+
+The fresh HTML is **340,036 bytes**, SHA-256
+`48e7d25e8211b815e8522fbc65f8918dd654cb6a84eed595665052414cca68c9`.
+Cargo's recorded executable is the newly built relocated compiler, SHA-256
+`3d23de77dce82342d6ff19882831b6078be30d1e725733a9676e7e54ecd98389`.
+An independent artifact check verified all eight embedded modules against
+current source, the complete template/CSS/license, Wasm bytes, and both hashes.
+The deterministic HTML happens to equal the tracked artifact; the tests serve
+the newly generated file, not the tracked copy.
+
+A visible Chrome quick replay passed at `/showcase/fresh-pi.html`: popup-blocker
+fallback, six tabs, repeated-click stress, six exact handoff boundaries, sole
+execution ownership, title/favicon changes, and Stop. Desktop and 390px-wide
+screenshots were visually inspected. These are real browser UI interactions
+using DevTools mouse input (and additional DOM-click stress), not a claim of a
+literal human manually operating every step. No application API replaces the
+UI controls. The harness checks uncaught page exceptions, but does not assert
+that every Chrome diagnostic or `console.error` message is absent.
+
+Two full local 370-second soak attempts lost their DevTools connections before
+completion, following healthy progress with all six tabs online at 242s and
+121s respectively. Both wrappers failed and did not run WebRTC; their evidence
+was retained. Passive logging on the replay recorded all seven active DevTools
+sockets closing together while Chrome was still alive, before cleanup sent any
+termination signal. The user subsequently reported spotty Wi-Fi and requested
+a code-only finish. Network instability is plausible context, not a proven
+cause; **the long soak is not qualified by these runs**. No retries, relaxed
+assertions, or background-throttling bypasses were added to the harness.
+
+The subsequent normal-length wrapper run passed both the full local scenario
+and quick literal-ICE WebRTC scenario, and exited 0 before the requested stop
+reached its process. Local checks included automatic touring, real freeze/thaw,
+an exact post-recovery handoff, and owner closure without a silent restart;
+WebRTC checked six exact handoffs and Stop. No additional tests were launched
+after the user's request. Final cleanup verification found no owned browser,
+wrapper, E2E, or server process remaining. A final code-only review found no additional blocker in
+the compiler selection, fresh packaging, failure handling, or workflow wiring.
+
+Evidence:
+
+- `/private/tmp/weave-pi-fresh-ci.Yr47Kx/run` — first fresh package, independent
+  source/hash verification, and retained interrupted browser run.
+- `/private/tmp/weave-pi-fresh-ci.Yr47Kx/headed` — passing visible-window replay
+  and desktop/mobile screenshots.
+- `/private/tmp/weave-pi-fresh-ci.Yr47Kx/replay` and adjacent
+  `replay-process-events.ndjson` — second interrupted soak and passive
+  child-process/DevTools-close diagnostics.
+- `/private/tmp/weave-pi-fresh-ci.Yr47Kx/default-check` — normal-length wrapper
+  run, with full local recovery and quick literal-ICE WebRTC both passing.
+- `/private/tmp/weave-pi-discovery.ALpTPk` — real absolute/relative target-path
+  probes and a second deterministic external package.
+- `/private/tmp/weave-pi-item2-js-lane-fresh.log` and
+  `/private/tmp/weave-pi-item2-js-lane-fixture.log` — complete JavaScript lanes.
+
+Environment: macOS ARM64, Rust/Cargo 1.86.0, Node 22.16.0, Chrome
+152.0.7977.83. Workflow definitions were checked locally; this is not a claim
+that GitHub's Ubuntu/Node 24 jobs or the entire WAMR release composition ran.
+
+## Earlier qualification — 2026-09-07
 
 The shipped artifact is `dist/index.html`. Only that file is served in browser
 tests; every other HTTP path returns 404. The ZIP contains only `index.html`.

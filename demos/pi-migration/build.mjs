@@ -6,19 +6,35 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { resolvePiCompiler } from "./compiler.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
 const args = process.argv.slice(2);
-if (args.some((arg) => arg !== "--update-test-fixture")) throw new Error("usage: node demos/pi-migration/build.mjs [--update-test-fixture]");
-const output = path.join(here, "dist");
+const usage = "usage: node demos/pi-migration/build.mjs [--out-dir PATH] [--update-test-fixture]";
+let output = path.join(here, "dist");
+let updateTestFixture = false;
+let selectedOutput = false;
+for (let index = 0; index < args.length; index++) {
+  if (args[index] === "--out-dir" && !selectedOutput) {
+    const value = args[++index];
+    if (!value || value.startsWith("--")) throw new Error(usage);
+    output = path.resolve(value);
+    selectedOutput = true;
+  } else if (args[index] === "--update-test-fixture" && !updateTestFixture) {
+    updateTestFixture = true;
+  } else {
+    throw new Error(usage);
+  }
+}
+const compiler = resolvePiCompiler();
 await mkdir(output, { recursive: true });
-const weave = process.env.WEAVE_BIN || path.join(root, "target/release/weave");
 const wovenPath = path.join(output, "pi.woven.wasm");
-const transformed = spawnSync(weave, ["transform", path.join(here, "pi.wat"), "-o", wovenPath, "--period", "64", "--stack-pages", "2"], { cwd: root, stdio: "inherit", timeout: 30000 });
+const transformed = spawnSync(compiler.command, ["transform", path.join(here, "pi.wat"), "-o", wovenPath, "--period", "64", "--stack-pages", "2"], { cwd: root, stdio: "inherit", timeout: 30000 });
 if (transformed.error || transformed.status !== 0) throw transformed.error || new Error("transform failed; build the weave CLI first (cargo build --release -p weave-cli)");
 const wasm = await readFile(wovenPath);
-if (args.includes("--update-test-fixture")) {
+if (!WebAssembly.validate(wasm)) throw new Error("Pi compiler output is not valid WebAssembly");
+if (updateTestFixture) {
   const fixture = {
     sourceSha256: createHash("sha256").update(await readFile(path.join(here, "pi.wat"))).digest("hex"),
     wasmSha256: createHash("sha256").update(wasm).digest("hex"),

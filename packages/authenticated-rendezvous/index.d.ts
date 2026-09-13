@@ -91,41 +91,55 @@ export function parseCanonicalJson(
 
 export interface CryptoKeyLike {
   readonly type: "public" | "private" | "secret";
-  readonly algorithm: { readonly name: string; [key: string]: unknown };
+  readonly algorithm: { readonly name: string };
   readonly usages: readonly string[];
 }
 
+export interface CryptoKeyPairLike {
+  readonly publicKey: CryptoKeyLike;
+  readonly privateKey: CryptoKeyLike;
+}
+
+/** Non-shared bytes supplied to a provider or external signing hook. */
+export type CryptoBytes = Uint8Array & { readonly buffer: ArrayBuffer };
+/** Structural Web Crypto input, without requiring DOM or Node ambient types. */
+export type CryptoBufferSource = ArrayBuffer | (ArrayBufferView & { readonly buffer: ArrayBuffer });
+
 export interface SubtleCryptoLike {
-  digest(algorithm: string, data: ByteSource): Promise<ArrayBuffer>;
+  digest(algorithm: "SHA-256", data: CryptoBufferSource): Promise<ArrayBuffer>;
+  /**
+   * Some native overloads report a key-or-pair union even for Ed25519.
+   * generateNodeIdentity validates the resulting Ed25519 pair at runtime.
+   */
   generateKey(
     algorithm: { name: "Ed25519" },
     extractable: boolean,
-    usages: string[],
-  ): Promise<{ publicKey: CryptoKeyLike; privateKey: CryptoKeyLike }>;
+    usages: ("sign" | "verify")[],
+  ): Promise<CryptoKeyLike | CryptoKeyPairLike>;
   exportKey(format: "raw", key: CryptoKeyLike): Promise<ArrayBuffer>;
   importKey(
     format: "raw",
-    keyData: ByteSource,
+    keyData: CryptoBufferSource,
     algorithm: { name: "Ed25519" },
     extractable: boolean,
-    usages: string[],
+    usages: "verify"[],
   ): Promise<CryptoKeyLike>;
   sign(
     algorithm: { name: "Ed25519" },
     key: CryptoKeyLike,
-    data: ByteSource,
+    data: CryptoBufferSource,
   ): Promise<ArrayBuffer>;
   verify(
     algorithm: { name: "Ed25519" },
     key: CryptoKeyLike,
-    signature: ByteSource,
-    data: ByteSource,
+    signature: CryptoBufferSource,
+    data: CryptoBufferSource,
   ): Promise<boolean>;
 }
 
 export interface CryptoProviderLike {
   readonly subtle: SubtleCryptoLike;
-  getRandomValues<T extends ArrayBufferView>(array: T): T;
+  getRandomValues<T extends CryptoBytes>(array: T): T;
 }
 
 export interface CryptoOptions {
@@ -141,8 +155,8 @@ export interface NodeIdentity {
   readonly publicKey: string;
   readonly verificationKey?: CryptoKeyLike;
   readonly signingKey?: CryptoKeyLike;
-  /** Structural signing hook for hardware keys and remote KMS implementations. */
-  sign?(bytes: Uint8Array): ByteSource | Promise<ByteSource>;
+  /** Structural signing hook; receives a fresh, non-shared copy of the bytes. */
+  sign?(bytes: CryptoBytes): ByteSource | Promise<ByteSource>;
 }
 
 export function nodeIdFromPublicKey(
@@ -155,7 +169,7 @@ export function verifyNodeId(
   options?: CryptoOptions,
 ): Promise<true>;
 export function createNodeIdentity(
-  keyPair: { publicKey: CryptoKeyLike; privateKey: CryptoKeyLike },
+  keyPair: CryptoKeyPairLike,
   options?: CryptoOptions,
 ): Promise<NodeIdentity>;
 export function generateNodeIdentity(

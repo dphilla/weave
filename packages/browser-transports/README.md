@@ -74,6 +74,7 @@ import { RTCDataChannelByteStream } from "@weave-net/browser-transports";
 
 const channel = peerConnection.createDataChannel("application-data", {
   ordered: true,
+  protocol: "example.stream.v1",
 });
 
 const stream = new RTCDataChannelByteStream(channel, {

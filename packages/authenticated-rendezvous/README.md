@@ -36,6 +36,28 @@ normally use `globalThis.crypto`. Private keys remain in non-extractable
 from `node:crypto` and pass it as the `crypto` option when the global Web
 Crypto API is not enabled.
 
+### TypeScript consumers
+
+The package includes declarations for browser `Crypto`/`CryptoKey` objects and
+Node's `webcrypto`, without requiring DOM types in a Node project. For example,
+this Node ESM consumer needs no cast:
+
+```ts
+import { webcrypto } from "node:crypto";
+import { generateNodeIdentity } from "@weave-net/authenticated-rendezvous";
+
+const identity = await generateNodeIdentity({ crypto: webcrypto });
+```
+
+If you generate keys yourself, some Node type declarations return a key-or-pair
+union even for Ed25519. Check `"publicKey" in keys` before passing the result to
+`createNodeIdentity`; it requires a pair and validates both keys at runtime.
+Custom providers can implement the exported structural `CryptoProviderLike`
+interface without importing browser or Node types. External `NodeIdentity.sign`
+hooks receive a fresh, non-shared byte copy that can be passed directly to
+native Web Crypto signing methods. General byte-input APIs still accept the
+broader `ByteSource` type; this does not relax key or signature validation.
+
 ## Security model
 
 V1 assumes the rendezvous transport can read, delay, drop, duplicate, reorder,

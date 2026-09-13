@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -109,6 +110,37 @@ class DelayedBlob extends Blob {
     return super.arrayBuffer();
   }
 }
+
+test("README RTC example configures its required protocol and writes the payload", async () => {
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  const section = readme.split("## RTCDataChannel\n")[1]?.split("\n## ")[0];
+  const example = section?.match(/```js\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(example, "README must contain the RTCDataChannel JavaScript example");
+  const importLine = 'import { RTCDataChannelByteStream } from "@weave-net/browser-transports";';
+  assert.ok(example.startsWith(importLine));
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const runExample = new AsyncFunction("RTCDataChannelByteStream", "peerConnection", "payload",
+    `${example.slice(importLine.length)}\nreturn stream;`);
+  const payload = Uint8Array.of(1, 2, 3, 4);
+  let channel;
+  let stream;
+  try {
+    stream = await runExample(RTCDataChannelByteStream, {
+      createDataChannel(label, options) {
+        assert.equal(label, "application-data");
+        channel = new FakeDataChannel(options);
+        channel.open();
+        return channel;
+      },
+    }, payload);
+    assert.equal(channel.protocol, "example.stream.v1");
+    assert.equal(stream.channel, channel);
+    assert.deepEqual(channel.sent.map((bytes) => [...bytes]), [[...payload]]);
+  } finally {
+    if (stream) await stream.close();
+    else channel?.close();
+  }
+});
 
 test("browser transports require paired listener installation and cleanup methods", () => {
   const socket = {

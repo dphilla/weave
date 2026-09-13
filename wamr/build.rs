@@ -2,6 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod build_inputs;
 mod compat;
 
 const PINNED_WAMR: &str = include_str!("WAMR_VERSION");
@@ -19,6 +20,7 @@ fn main() {
     println!("cargo:rerun-if-changed=CMakeLists.txt");
     println!("cargo:rerun-if-changed=WAMR_VERSION");
     println!("cargo:rerun-if-changed=compat.rs");
+    println!("cargo:rerun-if-changed=build_inputs.rs");
 
     let root = PathBuf::from(env::var_os("WAMR_ROOT").unwrap_or_else(|| {
         panic!(
@@ -26,6 +28,10 @@ fn main() {
             PINNED_WAMR.trim()
         )
     }));
+    // CMake and Cargo must resolve relative roots against the same directory.
+    // Do not canonicalize away a source symlink: changing its target is an input.
+    let root = env::current_dir().unwrap().join(root);
+    build_inputs::watch(&root);
     let header = root.join("core/iwasm/include/wasm_export.h");
     assert!(
         header.is_file(),
@@ -84,6 +90,7 @@ fn check_version(root: &Path) {
     let allow_untested =
         env::var_os("WEAVE_WAMR_ALLOW_UNTESTED").as_deref() == Some(std::ffi::OsStr::new("1"));
     let output = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)
         .args(["describe", "--tags", "--exact-match"])
@@ -114,6 +121,8 @@ fn check_version(root: &Path) {
     }
 
     let output = Command::new("git")
+        // Validation must not refresh the watched index and invalidate itself.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
         .arg(root)
         .args(["status", "--porcelain", "--untracked-files=normal"])

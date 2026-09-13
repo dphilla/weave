@@ -75,8 +75,9 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
   let stopped = false;
   let waitingForDuplexDrain = false;
   let waitingForWebSocketDrain = false;
-  let forceCloseTimer = null;
+  let shutdownTimer = null;
   let watchingDuplexShutdown = false;
+  let duplexCloseSeen = false;
 
   const report = (value, side) => {
     const error = normalizeError(value);
@@ -121,9 +122,17 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
     }
     try {
       const writable = duplex.write(chunk);
+      if (stopped) return false;
       if (!writable && !waitingForDuplexDrain) {
         waitingForDuplexDrain = true;
         duplex.once("drain", onDuplexDrain);
+        // newListener runs before EventEmitter adds this listener, so cleanup
+        // during registration cannot remove it until once() returns.
+        if (stopped) {
+          duplex.off("drain", onDuplexDrain);
+          waitingForDuplexDrain = false;
+          return false;
+        }
       }
       return writable;
     } catch (error) {
@@ -143,10 +152,18 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
     }
     try {
       const writable = websocket.sendBinary(chunk);
+      if (stopped) return;
       if (!writable && !waitingForWebSocketDrain) {
         waitingForWebSocketDrain = true;
-        duplex.pause();
+        // pause emits synchronously: install the drain observer first so a
+        // reentrant drain is not lost, and a reentrant close can remove it.
         websocket.once("drain", onWebSocketDrain);
+        if (stopped) {
+          websocket.off("drain", onWebSocketDrain);
+          waitingForWebSocketDrain = false;
+          return;
+        }
+        if (waitingForWebSocketDrain) duplex.pause();
       }
     } catch (error) {
       shutdown("websocket", error, 1011, "WebSocket endpoint failed");
@@ -154,7 +171,10 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
   };
 
   const onDuplexEnd = () => shutdown("duplex", null, 1000, "duplex ended");
-  const onDuplexClose = () => shutdown("duplex", null, 1000, "duplex closed");
+  const onDuplexClose = () => {
+    duplexCloseSeen = true;
+    shutdown("duplex", null, 1000, "duplex closed");
+  };
   const onDuplexError = (error) => {
     shutdown("duplex", error, 1011, "duplex endpoint failed");
   };
@@ -193,63 +213,104 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
   const finishDuplexShutdown = () => {
     if (!watchingDuplexShutdown) return;
     watchingDuplexShutdown = false;
-    if (forceCloseTimer !== null) clearTimeout(forceCloseTimer);
-    forceCloseTimer = null;
+    if (shutdownTimer !== null) clearTimeout(shutdownTimer);
+    shutdownTimer = null;
     duplex.off("error", onClosingDuplexError);
-    duplex.off("close", finishDuplexShutdown);
+    duplex.off("close", onClosingDuplexClose);
   };
 
   const onClosingDuplexError = (error) => {
     report(error, "duplex");
   };
 
+  const onClosingDuplexClose = () => {
+    duplexCloseSeen = true;
+    finishDuplexShutdown();
+  };
+
   const watchDuplexShutdown = () => {
-    if (watchingDuplexShutdown || duplex.destroyed === true) return;
+    if (watchingDuplexShutdown || duplexCloseSeen) return;
     watchingDuplexShutdown = true;
-    // A socket can still fail after end() while its final bytes drain. Keep a
-    // bounded terminal observer so that failure cannot become an unhandled
-    // EventEmitter error after the active bridge listeners are detached.
+    // destroyed means destruction STARTED, not that queued error/close events
+    // have arrived. Install terminal observers before detaching active ones.
     duplex.on("error", onClosingDuplexError);
-    duplex.once("close", finishDuplexShutdown);
+    duplex.once("close", onClosingDuplexClose);
+    // EventEmitter's newListener callbacks can themselves close the duplex.
+    if (duplexCloseSeen) finishDuplexShutdown();
+  };
+
+  const waitForDuplexClose = () => {
+    if (!watchingDuplexShutdown) return;
+    if (shutdownTimer !== null) clearTimeout(shutdownTimer);
+    const check = () => {
+      shutdownTimer = null;
+      if (!watchingDuplexShutdown) return;
+      let closed;
+      try { closed = duplex.closed; } catch (error) { report(error, "duplex"); }
+      if (!watchingDuplexShutdown) return;
+      if (closed === false) {
+        // A native asynchronous _destroy callback can outlive the force-close
+        // grace period. Keep observing until it actually completes.
+        shutdownTimer = setTimeout(check, 10);
+      } else if (closed === true) {
+        // Even closed becomes true before Node delivers its nextTick error.
+        // Only inspect it on a later timer turn, including emitClose:false.
+        finishDuplexShutdown();
+      } else {
+        // Legacy stream-like endpoints may expose neither closed nor a close
+        // event. Bound their otherwise unobservable terminal-listener lifetime.
+        shutdownTimer = setTimeout(finishDuplexShutdown, DEFAULT_CLOSE_TIMEOUT_MS);
+      }
+      shutdownTimer?.unref?.();
+    };
+    shutdownTimer = setTimeout(check, 0);
+    shutdownTimer.unref?.();
+  };
+
+  const forceDuplexClose = () => {
+    destroyDuplex();
+    waitForDuplexClose();
   };
 
   const closeDuplex = (immediate) => {
-    if (duplex.destroyed === true) return;
-    watchDuplexShutdown();
+    if (!watchingDuplexShutdown) return;
+    if (duplex.destroyed === true) {
+      waitForDuplexClose();
+      return;
+    }
     if (immediate) {
-      destroyDuplex();
-      if (duplex.destroyed === true) finishDuplexShutdown();
+      forceDuplexClose();
       return;
     }
     try {
       duplex.end();
     } catch (error) {
       report(error, "duplex");
-      destroyDuplex();
-      if (duplex.destroyed === true) finishDuplexShutdown();
+      forceDuplexClose();
       return;
     }
+    if (!watchingDuplexShutdown) return;
     if (duplex.destroyed === true) {
-      finishDuplexShutdown();
+      waitForDuplexClose();
       return;
     }
     if (closeTimeoutMs === 0) {
-      destroyDuplex();
-      if (duplex.destroyed === true) finishDuplexShutdown();
+      forceDuplexClose();
       return;
     }
-    forceCloseTimer = setTimeout(() => {
-      destroyDuplex();
-      if (duplex.destroyed === true) finishDuplexShutdown();
+    shutdownTimer = setTimeout(() => {
+      shutdownTimer = null;
+      forceDuplexClose();
     }, closeTimeoutMs);
-    forceCloseTimer.unref?.();
+    shutdownTimer.unref?.();
   };
 
   function shutdown(side, error, code, reason) {
     if (stopped) return false;
     stopped = true;
-    if (error !== null && error !== undefined) report(error, side);
+    watchDuplexShutdown();
     detach();
+    if (error !== null && error !== undefined) report(error, side);
 
     if (!websocket.closed) {
       try {
@@ -282,7 +343,7 @@ export function bridgeWebSocketToDuplex(websocket, duplex, options = {}) {
   try {
     websocket.setBinaryHandler(onBinary);
     setupSide = "duplex";
-    duplex.resume();
+    if (!stopped) duplex.resume();
   } catch (error) {
     shutdown(setupSide, error, 1011, "bridge setup failed");
     throw error;

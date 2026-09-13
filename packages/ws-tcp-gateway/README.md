@@ -47,9 +47,22 @@ A duplex-side error is destroyed immediately. The default timeout is 2000 ms;
 zero requests immediate destruction. Timers are unreferenced when the runtime
 supports it.
 
-Cleanup is idempotent: the binary handler and every listener installed by the
-bridge are removed when shutdown begins. Exceptions thrown by `onError` are
-suppressed so diagnostics cannot interrupt cleanup.
+Cleanup is idempotent: the binary handler and forwarding/drain listeners are
+removed when shutdown begins, including when an endpoint callback closes the
+bridge synchronously. Terminal duplex error/close observers remain until
+`close` arrives, because Node can queue an error after setting `destroyed`.
+For native streams with `emitClose: false`, cleanup waits until a later
+event-loop turn observes `closed: true`. An asynchronous native destruction
+callback must finish before those observers can safely be removed; its duration
+is separate from the force-close grace period.
+
+Custom stream-like endpoints should emit `close` or expose the same boolean
+`closed` lifecycle flag. If neither completion signal is available, terminal
+observers expire 2000 ms after destruction is requested or observed; such
+endpoints must not emit errors after that fallback window. All cleanup timers
+are unreferenced where supported. Only bridge-owned listeners are removed.
+Exceptions thrown by `onError` are suppressed so diagnostics cannot interrupt
+cleanup.
 
 ## Normalized binary-WebSocket contract
 

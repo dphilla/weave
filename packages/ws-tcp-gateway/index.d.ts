@@ -26,6 +26,8 @@ export interface BinaryWebSocketEndpoint {
 /** The subset of a Node Duplex stream used by the gateway core. */
 export interface DuplexEndpoint {
   readonly destroyed?: boolean;
+  /** Native destruction completion flag; queued terminal events may still follow. */
+  readonly closed?: boolean;
   on(event: "data", listener: (bytes: Uint8Array) => void): unknown;
   once(event: "drain" | "end" | "close", listener: EventListener): unknown;
   once(event: "error", listener: (error: unknown) => void): unknown;

@@ -14,7 +14,7 @@ usage: .github/ci/run-unit.sh rust|rust-quality|js|go|all
 
   rust          build and test the root Rust workspace
   rust-quality  require root/WAMR rustfmt and warning-free root Clippy
-  js            run Node and browser-transport unit tests
+  js            run JavaScript tests, clean package installs, and strict type consumers
   go            format-check, vet, test, and build both Go modules
   all           run rust-quality, rust, js, and go sequentially
 EOF
@@ -37,6 +37,7 @@ run_js() {
   NODE_BIN="$NODE_BIN" bash .github/ci/pi-demo-smoke.test.sh
   "$NODE_BIN" --test js/*.test.mjs demos/*/*.test.mjs packages/*/test/*.test.mjs
   NODE_BIN="$NODE_BIN" .github/ci/package-smoke.sh
+  NODE_BIN="$NODE_BIN" .github/ci/typecheck.sh
 }
 
 run_go() {

@@ -27,6 +27,8 @@ Cargo behavior unless the caller sets that variable too.
 | `awake-guard.test.sh` | Isolated platform, bypass, argv, and exit-status checks |
 | `run-unit.sh` | Required Rust-quality, root Rust, JavaScript, and Go lanes |
 | `package-smoke.sh` | Pack, clean-install, and import every reusable JavaScript workspace |
+| `typecheck.sh` | Pack and clean-install authenticated rendezvous, strictly compile browser/Node/custom-provider consumers, and execute the Node consumer |
+| `typecheck/package.json`, `typecheck/package-lock.json` | Exact CI-only TypeScript and Node declaration dependencies; no product dependencies |
 | `with-timeout.sh` | Portable process-group timeout and forced cleanup |
 | `wait-for.sh` | Suspend-safe process, output, and event condition waits |
 | `wait-for.test.sh` | Isolated condition success and active-time timeout checks |
@@ -79,6 +81,9 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-control-check \
 # Exercise only the publishable package boundary from a clean consumer.
 .github/ci/package-smoke.sh
 
+# Check the installed TypeScript API and execute its native Node Web Crypto consumer.
+.github/ci/typecheck.sh
+
 # See the selected topology without building anything.
 .github/ci/conformance.sh --suite pr --list
 
@@ -95,6 +100,25 @@ WEAVE_CI_ARTIFACT_DIR=/tmp/weave-route \
 .github/ci/checkpoint-file.sh
 .github/ci/rust-guest.sh
 ```
+
+### Installed TypeScript consumers
+
+The JavaScript lane (including `run-unit.sh all`) runs `typecheck.sh`, so the
+existing PR, main, and release language gates enforce it without an additional
+workflow job. The runner builds a fresh npm archive and installs it in an
+out-of-checkout consumer. Three strict TypeScript configurations check DOM-only
+browser types, DOM-free Node types, and an ES-only custom crypto provider. Invalid
+providers, keys, signing hooks, and policies must still produce type errors;
+`skipLibCheck` is disabled. The compiled Node consumer then creates real Ed25519
+identities and signs and verifies a capability through an external signing hook.
+
+The compiler and Node ambient types are pinned only in `typecheck/package.json`
+and its lockfile, installed with `npm ci --ignore-scripts`. A first run needs
+npm registry access; once those exact dependencies are cached,
+`npm_config_offline=true .github/ci/typecheck.sh` also works. `NODE_BIN`, `NPM_BIN`,
+and npm's standard cache settings are honored. Artifacts follow the shared
+retention policy below; caller-selected output must be outside the checkout,
+and existing consumer/pack directories are refused instead of reused.
 
 ### Local power and suspend behavior
 

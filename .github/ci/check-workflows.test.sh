@@ -46,7 +46,7 @@ new_fixture() {
   printf '%s\n' 'ACTIONLINT_VERSION=fixture-must-not-download' > "$CASE_ROOT/.github/ci/versions.env"
 
   local script
-  for script in .github/ci/000-first.sh .github/ci/package-smoke.sh \
+  for script in .github/ci/000-first.sh .github/ci/package-smoke.sh .github/ci/typecheck.sh \
     .github/ci/semantic-conformance.sh .github/ci/browser-sidecar-smoke.sh .github/ci/pi-demo-smoke.sh \
     .github/ci/awake-guard.sh .github/ci/wait-for.sh \
     demos/aaa-syntax/000-first.sh demos/browser-sidecar/run.sh \
@@ -110,6 +110,10 @@ run_fixture() {
 
 new_fixture
 run_fixture 'valid baseline; syntax checks do not execute script bodies' pass
+
+new_fixture
+chmod -x "$CASE_ROOT/.github/ci/typecheck.sh"
+run_fixture 'type-check entry point must be executable' fail '.github/ci/typecheck.sh must be executable'
 
 for broken in .github/ci/zz-broken.sh demos/zzz-syntax/zz-broken.sh scripts/zz-broken.sh; do
   new_fixture

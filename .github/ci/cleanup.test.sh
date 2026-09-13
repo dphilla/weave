@@ -77,6 +77,7 @@ allowed_names=(
   weave-browser-sidecar.abc123
   weave-browser-smoke.abc123
   weave-pi-demo.abc123
+  weave-typecheck.abc123
   weave-checkpoint.abc123
   weave-native-e2e.abc123
   weave-semantic-conformance.abc123

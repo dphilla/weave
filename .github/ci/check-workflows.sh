@@ -32,6 +32,10 @@ printf 'PASS shell syntax (%s scripts)\n' "$shell_scripts"
   printf '%s\n' '.github/ci/package-smoke.sh must be executable' >&2
   exit 1
 }
+[[ -x .github/ci/typecheck.sh ]] || {
+  printf '%s\n' '.github/ci/typecheck.sh must be executable' >&2
+  exit 1
+}
 [[ -x .github/ci/semantic-conformance.sh ]] || {
   printf '%s\n' '.github/ci/semantic-conformance.sh must be executable' >&2
   exit 1

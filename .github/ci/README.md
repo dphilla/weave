@@ -40,6 +40,8 @@ Cargo behavior unless the caller sets that variable too.
 | `native-e2e.sh` | Safe composition used by the legacy `scripts/e2e.sh` shim |
 | `prepare-wamr.sh` | Safe temporary checkout plus immutable WAMR tag verification |
 | `prepare-wasm-tools.sh` | Platform-select and checksum the pinned official corpus tool |
+| `prepare-testsuite.sh` | Acquire and verify pinned test data, or explicitly refresh upstream |
+| `prepare-testsuite.test.sh` | Offline real-Git acquisition, reuse, and destination-safety regressions |
 | `run-wamr.sh` | Independent WAMR workspace strict Clippy, tests, and release build |
 | `browser-smoke.sh` | Required Chrome → WAMR → Chrome → WAMR smoke |
 | `browser-peer-smoke.sh` | Required Chrome A → B → A WebRTC smoke with local signaling/STUN |
@@ -49,7 +51,8 @@ Cargo behavior unless the caller sets that variable too.
 | `wamr-fixture.sh` | Multiple-memory Wasmtime → WAMR → Wasmtime chain |
 | `adversity.sh` | Protocol failure tests and repeated migration thresholds |
 | `host-service-baseline.sh` | Current built-in host-service behavior tests |
-| `spec-corpus.sh` | Weekly official WebAssembly testsuite transformer smoke |
+| `spec-corpus.sh` | Pinned official WebAssembly transformer smoke; explicit upstream drift probe |
+| `spec-corpus-inputs.py` | Validate extraction manifests and record/check exact corpus input hashes |
 | `spec-corpus.test.sh` | Corpus classification regression checks with deterministic fake tools |
 | `qualification.sh` | Deterministic, non-publishing runtime qualification composition |
 | `check-workflows.sh` | Per-file shell syntax, action SHA pins, CI harness tests, and pinned actionlint validation |
@@ -397,6 +400,20 @@ point.
 
 ## Corpus replay and failure policy
 
+Scheduled runs use the immutable `WASM_TESTSUITE_COMMIT` in `versions.env`,
+qualified together with the checksum-pinned `wasm-tools` version. The initial
+pair is testsuite `67c8b9dc32c47d61c05a1681df349d01c85fa8ff` and
+`wasm-tools 1.258.0`: 257 scripts, 1,813 transformed/validated modules, 429
+explicit unsupported-feature rejections, and zero hard failures.
+
+This pin addresses an extractor compatibility gap, not a transformer exemption.
+The next upstream testsuite update (`f4c57375af01be95a052355f779f0807078c1941`)
+adds a negative multiple-supertype assertion in `type-subtyping.wast` that this
+extractor cannot parse. It aborts before Weave receives the script's valid
+modules. The pinned baseline still processes that entire file; no assertions,
+files, or failures are filtered out. Upgrade the tool/testsuite pair only after
+a full extraction, transformation, and validation run succeeds.
+
 Run a small local sample with:
 
 ```sh
@@ -410,13 +427,44 @@ WEAVE_CORPUS_MIN_SUCCESSES=1 \
 A full run omits `WEAVE_CORPUS_MAX_WAST_FILES`. Only explicit unsupported
 diagnostic families returned with the ordinary error status are accepted.
 There are no known-failure exceptions: unexpected errors, crashes, and invalid
-transformed output fail the run. Inspect `report.tsv` and fix the transformer
-or reject an unsupported input feature before transformation. Crash detection
-takes precedence over unsupported diagnostic text.
+transformed output fail the run, as do extraction failures or malformed
+extraction manifests. Inspect `report.tsv` and the per-case diagnostics to
+distinguish an extractor gap from a transformer defect. Crash detection takes
+precedence over unsupported diagnostic text.
+
+To probe current upstream explicitly, run `.github/ci/spec-corpus.sh --upstream`
+with a fresh artifact directory, or select `upstream` in the weekly workflow's
+manual dispatch form. This mode fetches the official default-branch HEAD and
+remains strictly failing on the known extractor gap until that gap is fixed;
+it is not a green compatibility baseline. The scheduled default is `pinned`.
+
+For offline replay, pass an existing testsuite directory and provide
+`WASM_TOOLS_BIN` and `WEAVE_BIN` as executable paths. An explicit `WEAVE_BIN`
+skips Cargo entirely; invalid explicit tools fail without downloading or
+building replacements. Supplied directories are never fetched or checked out
+and are labeled `supplied`, including their Git cleanliness when available.
+An unversioned subdirectory is not attributed to its parent repository's HEAD.
+Only top-level `.wast` files are selected; this lane checks transformation and
+output validity, not the runtime execution of the spec assertions.
+
+`inputs.json` records selected script hashes, actual/expected revision, Git
+state, extractor version, and both executable hashes. Inputs are checked again
+at the end, so mutation during a run is a hard failure. `summary.txt` distinguishes
+discovered, selected, and successfully extracted scripts; a capped smoke is
+not a full qualification. Use fresh report directories: existing `cases/` is
+refused to prevent stale extracted modules from making a run appear to pass.
+Keep artifacts outside supplied source directories. Managed acquisition must
+be beneath `RUNNER_TEMP` (or `TMPDIR`, default `/tmp`) and outside this project.
+`prepare-testsuite.sh DESTINATION` can reuse an already-correct, clean pinned
+checkout without network; wrong commits, origins, or dirty state are refused
+without resetting caller files.
 
 `spec-corpus.test.sh`, also run by `check-workflows.sh`, tests this policy with
 deterministic fake tools. It requires no corpus download or Rust compilation
-and checks that the six former baseline exception keys now fail normally.
+and checks that the six former baseline exception keys now fail normally,
+alongside malformed extraction, explicit-tool, provenance, and stale-artifact
+regressions. `prepare-testsuite.test.sh` uses local Git origins to exercise
+acquisition and failure paths without network access.
 
 ## External and generated data policy
 
@@ -427,9 +475,10 @@ and checks that the six former baseline exception keys now fail normally.
 - WAMR uses a product tag plus an immutable commit verification.
 - `wasm-tools` is version- and per-platform-checksum-pinned in `versions.env`;
   `actionlint` is version-pinned there as well.
-- The official WebAssembly testsuite is test data, not executed code. Weekly
-  runs intentionally fetch its current default branch and record the exact
-  commit in the artifact report so new spec cases are discovered.
+- The official WebAssembly testsuite is test data, not executed code. Scheduled
+  runs use the qualified immutable commit in `versions.env`; explicit
+  `--upstream`/manual `upstream` runs discover drift against the current default
+  branch without weakening failure policy. Both record exact input provenance.
 - Expected rejections must use one of the explicit unsupported-feature
   diagnostics in `spec-corpus.sh`. Every other transform error is a hard
   failure; corpus names and filenames never exempt a failure. Unsupported

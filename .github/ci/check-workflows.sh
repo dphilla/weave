@@ -70,6 +70,7 @@ bash .github/ci/check-workflows.test.sh
 .github/ci/cleanup.test.sh
 .github/ci/awake-guard.test.sh
 .github/ci/wait-for.test.sh
+.github/ci/prepare-testsuite.test.sh
 .github/ci/spec-corpus.test.sh
 
 server_chain_list="$(demos/server-chain/run.sh --list)"

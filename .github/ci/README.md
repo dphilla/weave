@@ -204,6 +204,14 @@ export WAMR_ROOT="$ci_tmp/wasm-micro-runtime"
 wrong-origin checkouts and verifies both `wamr/WAMR_VERSION` and the immutable
 commit in `versions.env` before checkout.
 
+`run-wamr.sh` also runs the adapter's warm-cache build regressions through its
+ordinary `cargo test` invocation. Disposable regular checkouts, linked worktrees,
+and separate Git directories exercise same-path dependency changes and unchanged
+build reuse with real Cargo/CMake and a small native executable. The fixtures
+need no network downloads; the adapter's initial WAMR/SIMDe setup is unchanged.
+Build-local source-mirror tests additionally guard source immutability and
+overlapping-path/symlink safety. No new workflow job or service is required.
+
 The browser lane additionally requires Node 22 or newer and Chrome/Chromium:
 
 ```sh

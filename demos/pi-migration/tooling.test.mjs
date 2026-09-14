@@ -14,7 +14,7 @@ const FILES = [
   "LICENSE", "js/weave.mjs", "js/weave-browser.mjs",
   "packages/browser-transports/src/index.mjs", "packages/webrtc-session/src/index.mjs",
   ...["app.mjs", "build.mjs", "compiler.mjs", "index.template.html", "pi-fixture.mjs",
-    "pi.wat", "runtime.mjs", "style.css", "tab-indicator.mjs", "tab-stream.mjs", "test-fixture.mjs"]
+    "pi.wat", "runtime.mjs", "rtc-diagnostics.mjs", "style.css", "tab-indicator.mjs", "tab-stream.mjs", "test-fixture.mjs"]
     .map((filename) => `demos/pi-migration/${filename}`),
 ];
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");

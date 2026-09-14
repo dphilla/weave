@@ -2,6 +2,7 @@ import { WeaveInstance, SourceMigration, acceptMigration, sha256, hex } from "..
 import { RTCDataChannelByteStream } from "../../packages/browser-transports/src/index.mjs";
 import { WebRTCSession } from "../../packages/webrtc-session/src/index.mjs";
 import { TabByteStream } from "./tab-stream.mjs";
+import { observeRtcConnection, formatConnectionFailure } from "./rtc-diagnostics.mjs";
 
 // Both transports carry the same unmodified Weave migration protocol. The
 // default local stream uses a dedicated, bounded browser channel. Optional
@@ -212,7 +213,10 @@ export class TabRuntime {
   }
 
   _setOperation(change) {
-    this.operation = { ...this.operation, ...change };
+    // A new attempt must not inherit another operation's commit statistics or
+    // connection diagnostics. Updates within the same operation remain partial.
+    this.operation = change.id && change.id !== this.operation?.id
+      ? { ...change } : { ...this.operation, ...change };
     this._post({ type: "operation", operation: this.operation });
     this._emit({ type: "operation", operation: { ...this.operation } });
   }
@@ -471,13 +475,22 @@ export class TabRuntime {
           link.stream = this._stream(channel);
           link.ready = Promise.all([link.session.start(), link.stream.opened]);
         } else link.ready = link.stream.opened;
-        void link.ready.catch(() => {});
+        // Observe readiness without parking the guest's safe-point callback on
+        // network I/O. A pending transport is not yet a migration of this instance.
+        void link.ready.then(() => {
+          if (!link.done && link.generation === this.generation && !this.closed) link.readyState = "ready";
+        }, (error) => {
+          if (!link.done && link.generation === this.generation && !this.closed) {
+            link.readyError = error;
+            link.readyState = "failed";
+          }
+        });
         this.outbound = link;
         return new Promise((resolve) => { link.resolve = resolve; });
       } catch (error) {
-        this._disposeLink(link);
         this._setState("running", "retained");
-        throw error;
+        this._completeOutbound(link, this._connectionFailure(link, error));
+        return { ...this.operation };
       }
     }
     throw new Error(`Unknown demo command ${action}`);
@@ -491,7 +504,8 @@ export class TabRuntime {
   }
 
   _newLink(id, peer, role) {
-    const link = { id, peer, role, stream: null, done: false, generation: this.generation };
+    const link = { id, peer, role, stream: null, done: false, generation: this.generation,
+      readyState: "pending", readyError: null };
     if (this.transport === "local") {
       link.stream = new TabByteStream({ room: this.room, operationId: id, localId: this.instanceId, remoteId: peer,
         timeoutMs: 12_000, channelFactory: this.channelFactory });
@@ -523,6 +537,7 @@ export class TabRuntime {
       },
       onError: (error, { fatal }) => { if (fatal) this._failLink(link, error); },
     });
+    link.diagnostics = observeRtcConnection(link.session.peerConnection, { relayConfigured: false });
     this.links.set(id, link);
     return link;
   }
@@ -530,6 +545,10 @@ export class TabRuntime {
   _disposeLink(link) {
     if (!link || link.done) return;
     link.done = true;
+    if (link.diagnostics) {
+      link.connectionDiagnostics = link.diagnostics.snapshot();
+      link.diagnostics.stop();
+    }
     if (link.stream) void link.stream.close().catch(() => {});
     if (link.session) void link.session.close();
     this.links.delete(link.id);
@@ -537,6 +556,8 @@ export class TabRuntime {
 
   _failLink(link, error) {
     if (link.done) return;
+    link.readyError = error;
+    link.readyState = "failed";
     this._log(`Connection failed: ${messageOf(error)}`, "error");
     this._disposeLink(link);
     if (this.incoming === link) {
@@ -585,9 +606,16 @@ export class TabRuntime {
 
   _completeOutbound(link, change) {
     if (this.outbound === link) this.outbound = null;
-    this._setOperation(change);
+    const connectionDiagnostics = link.connectionDiagnostics ?? link.diagnostics?.snapshot();
+    this._setOperation({ ...change, ...(connectionDiagnostics ? { connectionDiagnostics } : {}) });
     link.resolve?.({ ...this.operation });
     this._disposeLink(link);
+  }
+
+  _connectionFailure(link, error) {
+    const diagnostics = link.connectionDiagnostics ?? link.diagnostics?.snapshot();
+    const detail = diagnostics ? `${messageOf(error)}. ${formatConnectionFailure(diagnostics)}` : messageOf(error);
+    return { phase: "failed", status: "failed", message: `Connection failed before commit; source continues: ${detail}` };
   }
 
   async _drive(inst, entry, args, controller) {
@@ -599,11 +627,13 @@ export class TabRuntime {
       for (;;) {
         const outcome = await inst.drive(entry, args, async () => {
           await taskTurns.yield(controller.signal);
+          if (controller.signal.aborted) return "continue";
           if (!migration && this.outbound) {
             link = this.outbound;
+            if (link.readyState === "pending" && !link.done && link.generation === this.generation) return "continue";
             try {
-              await link.ready;
-              if (controller.signal.aborted) return "continue";
+              if (link.readyState === "failed") throw link.readyError;
+              if (link.done || link.generation !== this.generation || this.closed) throw new Error("Connection closed before migration");
               migration = new SourceMigration(link.stream, inst, `pi-tab-${this.nodeId}`, {
                 budgetBytes: 256 * 1024, dirtyPageThreshold: 4, maxRounds: 4, readTimeoutMs: 12_000, commitTimeoutMs: 4000,
               });
@@ -613,7 +643,7 @@ export class TabRuntime {
             } catch (error) {
               migration = null;
               this._setState("running", "retained");
-              this._completeOutbound(link, { phase: "failed", status: "failed", message: `Connection failed before commit; source continues: ${messageOf(error)}` });
+              this._completeOutbound(link, this._connectionFailure(link, error));
               link = null;
             }
           }

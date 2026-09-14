@@ -1,5 +1,117 @@
 # Pi demo qualification
 
+## Connection-readiness fixes — 2026-09-14
+
+This qualification addresses a reproduced demo scheduling bug, not the
+unresolved browser/OS/network cause of an earlier stock-Chrome connectivity
+failure. Wi-Fi toggling during that investigation is possible context. No
+STUN/TURN infrastructure, browser privacy setting, or public migration,
+transport, or session library was changed.
+
+### Changes and reproduction
+
+- The source now keeps driving real Wasm while either transport's readiness is
+  pending. Previously the guest's safe-point callback awaited that promise,
+  stalling computation for the connection timeout. A new runtime regression
+  failed on the old implementation. A visible, native-WebRTC browser replay of
+  the old HTML also failed: four samples stayed at sequence **9755** while
+  signaling was held. Literal-ICE flags made this reproduction independent of
+  the stock-Chrome candidate-resolution problem.
+- Stop/source close settle pending source operations without waiting for
+  readiness; late notifications cannot revive a stopped generation. Immediate
+  DataChannel setup failure publishes a terminal failed operation and releases
+  source-side resources. Each new operation clears old commit statistics and
+  connection diagnostics instead of inheriting them.
+- Terminal WebRTC operation records include bounded, address-free observations
+  and useful failure guidance. Unknown/pending statistics remain explicit;
+  messages do not infer an mDNS or Wi-Fi root cause. Sampling never blocks the
+  guest, has at most one stats request pending, and disposes its timer/listeners.
+  Late stats completions cannot modify the captured record.
+
+This does not eliminate the existing protocol waits during handshake, page
+copy, or final safe-point handoff. Target reservations still expire through
+their existing cleanup deadlines before a retry; no automatic retry or silent
+switch of transport was introduced.
+
+### Automated checks
+
+- The complete compiler-required `.github/ci/run-unit.sh js` gate passed:
+  **502 tests, zero failures/skips**, all **29** Pi-wrapper fixtures, five clean
+  npm archive installation/import checks, and strict installed-package browser,
+  DOM-free Node and custom-provider TypeScript consumers.
+- The runtime suite passes **38/38**, including **12 new regressions** using
+  real compiled Wasm and the unchanged migration/session/transport libraries.
+  Controllable peers hold readiness after SDP resolves. Both transports cover
+  live progress, rejection and actual **12-second** expiry, exact retry
+  continuation, prompt Stop/close and late notifications. Deadline tests sample
+  again around nine seconds; they do not replace production timers. Additional
+  tests cover operation metadata and synchronous setup/listener cleanup.
+- **15 diagnostics tests** cover redaction, bounded counts/traversal, unknown
+  states, unavailable/throwing/rejected/never-settling stats, partial listener
+  registration, synchronous timer reentrancy and cleanup after late callbacks.
+- Full workflow gates passed under **Bash 3.2 and 5.2**, including 67 validator
+  fixtures, lifecycle/cleanup/awake/wait tests, 31 testsuite-acquisition cases,
+  69 corpus-classification cases, 55 action references and real actionlint.
+
+### Real browser/UI checks
+
+Both complete E2E runs passed on the same freshly packaged HTML: visible Chrome
+with literal-ICE WebRTC and stock headless Chrome with the default local
+transport. These use real browser controls through DevTools mouse input plus
+existing repeated-click stress, not a claim of literal human operation. The
+new fault hook only holds signaling messages; native RTC, Wasm, commands and
+migration bytes remain real. Screenshots were visually inspected.
+
+- Held signaling: the source progressed **21576 → 40024 → 58629 → 74049**
+  across four observations. Releasing it handed off exactly **78341 → 78342**
+  and advanced the real term count by exactly 32768, with one executor.
+- Blackholed signaling: failure was reported after **12.944 seconds**, with the
+  source still computing, no final/resume boundary and bounded native
+  diagnostics. Replaying expired signaling did not start the target. Explicit
+  retry handed off exactly **650752 → 650753**.
+- Stop during pending WebRTC, followed by replaying four late signals: all six
+  tabs stopped, counters stayed fixed and no new resume or start appeared.
+- Both modes passed popup-blocker fallback, six ordinary handoffs, automatic
+  touring, sole ownership, titles/favicons, desktop/mobile layout, session-log
+  download, post-recovery migration and owner loss without silent restart.
+  Local mode also migrated with browser network emulation offline. Real
+  freeze/thaw let local mode commit to a paused target and then resume on thaw;
+  WebRTC failed safely with its source continuing, then retried after recovery.
+- No uncaught page exceptions or external HTTP asset dependencies were found.
+  Only the HTML was served; background timer throttling was not disabled.
+
+Quick WebRTC now includes the brief held-signaling progress regression, so the
+existing PR/main wrapper exercises it. The longer timeout/retry and pending-Stop
+browser cases require a full direct WebRTC run; the wrapper still selects quick
+WebRTC. A six-minute soak, Firefox/Safari, stock-Chrome WebRTC connectivity,
+cross-device/network routes and the entire native release matrix were **not**
+requalified by this change. Literal-ICE flags alter address privacy in disposable
+test browsers and are not presented as a deployment fix.
+
+### Deployable and evidence
+
+The rebuilt `dist/index.html` is **354,236 bytes**, SHA-256
+`893faab3e617af87a2f2c1417117afb61a0355d7323b6053a194d8213ea42cdd`.
+All **nine** embedded modules match current sources, with only static import
+rewrites. The template, CSS, license, Wasm and manifest also match. Independent
+checks verified that the tracked and out-of-tree builds are byte-identical,
+and that the regenerated ZIP contains exactly one matching `index.html` with
+a valid CRC. Only that HTML is needed to deploy. The guest bytes are unchanged.
+
+Retained local evidence is under
+`/private/tmp/weave-pi-connection-fix.wxbD0J`:
+
+- `runtime-readiness-red.log`, `runtime-final-full.log`,
+  `runtime-late-notifications.log`, `rtc-diagnostics-tests.log`, `js-full.log`.
+- `browser/red-old-runtime`, `browser/green-webrtc-full-headed`, and
+  `browser/green-local-full`: results, screenshots and lifecycle traces.
+- `workflows-bash3.log`, `workflows-bash5.log`, `typecheck`,
+  `deployables-build-test.log`, `deployables-integrity.log` and the tested `dist`.
+
+Environment: macOS ARM64, Node 22.16.0, Chrome 152.0.7977.83, locked offline
+release build of `weave-cli`. These are local test results, not a claim that
+hosted GitHub jobs ran. Owned browser/server/test processes were cleaned up.
+
 ## Fresh-compiler CI qualification — 2026-09-12
 
 This review covers compiler discovery and CI qualification of the freshly built

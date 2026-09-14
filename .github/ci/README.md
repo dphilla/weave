@@ -261,6 +261,15 @@ PR runs both transports in quick mode. Main and release qualification run the
 full local scenario (including recovery) plus quick WebRTC. Nightly adds the
 370-second hidden/offline local soak. Missing Node 22+, Chrome, or a successful
 compiler/build/browser result fails the lane; it is not an optional skip.
+Even quick WebRTC runs briefly hold real signaling, verify that the source's
+Wasm counters keep advancing with sole ownership, then release it and check an
+exact handoff. Full WebRTC runs additionally exercise the unchanged 12-second
+connection deadline, retained-source failure with bounded diagnostics, explicit
+retry, and Stop with late signaling. These longer WebRTC cases are available
+through `node demos/pi-migration/e2e.mjs --html /tmp/.../dist/index.html
+--transport webrtc --literal-ice`; the wrapper's WebRTC leg remains quick.
+The JavaScript unit lane also covers both transports' actual connection
+deadlines, cancellation, late notifications, retry, and diagnostics cleanup.
 Each workflow uploads the tested `dist/index.html`, manifest, Cargo output,
 versions/provenance, browser results, and screenshots, including on failure.
 These jobs only test and upload diagnostics; they do not publish a site.

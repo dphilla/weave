@@ -52,6 +52,7 @@ const files = new Map([
   [path.join(root, "packages/browser-transports/src/index.mjs"), "weave-demo:transports"],
   [path.join(root, "packages/webrtc-session/src/index.mjs"), "weave-demo:session"],
   [path.join(here, "runtime.mjs"), "weave-demo:runtime"],
+  [path.join(here, "rtc-diagnostics.mjs"), "weave-demo:rtc-diagnostics"],
   [path.join(here, "tab-stream.mjs"), "weave-demo:tab-stream"],
   [path.join(here, "tab-indicator.mjs"), "weave-demo:tab-indicator"],
   [path.join(here, "app.mjs"), "weave-demo:app"],

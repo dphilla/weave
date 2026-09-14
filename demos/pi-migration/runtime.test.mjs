@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import test from "node:test";
 import { TabRuntime, TaskTurnScheduler, makeProgressServices } from "./runtime.mjs";
 import { loadPiWasm } from "./test-fixture.mjs";
@@ -13,6 +14,14 @@ async function until(predicate, timeout = 5000) {
     if (Date.now() >= deadline) throw new Error("Test condition timed out");
     await sleep(5);
   }
+}
+async function within(promise, timeout, message) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeout);
+    })]);
+  } finally { clearTimeout(timer); }
 }
 function event(type, values) { const result = new Event(type); Object.assign(result, values); return result; }
 
@@ -128,7 +137,7 @@ class FakeChannel extends EventTarget {
     this.readyState = "closed";
     queueMicrotask(() => {
       this.dispatchEvent(new Event("close"));
-      if (this.remote?.readyState !== "closed") this.remote.close();
+      if (this.remote && this.remote.readyState !== "closed") this.remote.close();
     });
   }
 }
@@ -158,7 +167,9 @@ class FakeRTC extends EventTarget {
     this.remoteDescription = description;
     this.remote = FakeRTC.peers.get(description.sdp);
     if (description.type !== "answer") return;
-    const remote = this.remote;
+    this.connect(this.remote);
+  }
+  connect(remote) {
     for (const channel of this.channels) {
       const other = new FakeChannel(channel.label, channel);
       channel.remote = other;
@@ -181,6 +192,92 @@ class FakeRTC extends EventTarget {
     for (const channel of this.channels) channel.close();
     FakeRTC.peers.delete(this.id);
   }
+}
+
+// SDP completes normally, but native ICE/SCTP readiness remains pending until
+// the test releases it. Holding an SDP promise instead would miss the actual
+// browser failure: successful signaling with no usable candidate pair.
+function controlledRTC() {
+  const attempts = [];
+  class DelayedRTC extends FakeRTC {
+    connect(remote) {
+      attempts.push({
+        source: this,
+        target: remote,
+        release: () => {
+          if (this.connectionState === "closed" || remote.connectionState === "closed") {
+            // A queued native notification may arrive after close. It must not
+            // revive a stopped generation or start a migration.
+            for (const peer of [this, remote]) {
+              for (const channel of peer.channels) channel.dispatchEvent(new Event("open"));
+              peer.dispatchEvent(new Event("connectionstatechange"));
+            }
+            return;
+          }
+          super.connect(remote);
+        },
+        reject: () => {
+          for (const peer of [this, remote]) {
+            if (peer.connectionState === "closed") continue;
+            peer.connectionState = "failed";
+            peer.iceConnectionState = "failed";
+            peer.dispatchEvent(new Event("connectionstatechange"));
+          }
+        },
+      });
+    }
+  }
+  return { attempts, RTCPeerConnection: DelayedRTC };
+}
+
+async function pendingConnection(transport) {
+  const rtc = controlledRTC();
+  const fixture = await room(2, { transport, RTCPeerConnection: rtc.RTCPeerConnection });
+  const held = [];
+  const observedChannels = new Set();
+  if (transport === "local") fixture.bus.drop = (message) => {
+    if (!["hello", "ready"].includes(message.kind)) return false;
+    held.push(structuredClone(message));
+    return true;
+  };
+  return {
+    ...fixture,
+    async pending(attempt = 0) {
+      await until(() => fixture.nodes[0].state === "connecting" && fixture.nodes[0].outbound
+        && (transport === "webrtc" ? rtc.attempts.length > attempt : held.length > 0));
+      if (transport === "local") for (const channel of fixture.bus.channels) {
+        if (channel.name.endsWith(`-${fixture.nodes[0].outbound.id}`)) observedChannels.add(channel);
+      }
+    },
+    release(attempt = 0) {
+      if (transport === "webrtc") return rtc.attempts[attempt].release();
+      fixture.bus.drop = () => false;
+      // Replay only the held native transport envelopes to their dedicated
+      // channel. No migration bytes or guest checkpoints are synthesized.
+      for (const message of held.splice(0)) {
+        for (const channel of new Set([...observedChannels, ...fixture.bus.channels])) {
+          if (channel.name.endsWith(`-${message.operationId}`)) {
+            channel.dispatchEvent(event("message", { data: structuredClone(message) }));
+          }
+        }
+      }
+    },
+    reject() {
+      if (transport === "webrtc") rtc.attempts[0].reject();
+      else fixture.nodes[0].outbound.stream.channel.dispatchEvent(new Event("messageerror"));
+    },
+  };
+}
+
+async function assertExactHandoff(fixture, result) {
+  assert.equal(result.status, "succeeded", JSON.stringify(result));
+  await until(() => fixture.events.some((item) => item.type === "boundary" && item.kind === "resume" && item.operationId === result.id));
+  const final = fixture.events.find((item) => item.type === "boundary" && item.kind === "final" && item.operationId === result.id);
+  const resumed = fixture.events.find((item) => item.type === "boundary" && item.kind === "resume" && item.operationId === result.id);
+  assert.equal(BigInt(resumed.sequence), BigInt(final.sequence) + 1n);
+  assert.equal(BigInt(resumed.terms), BigInt(final.terms) + 32768n);
+  assert.equal(fixture.nodes.filter((node) => node.ownership === "retained").length, 1);
+  assert.equal(fixture.events.filter((item) => item.type === "boundary" && item.kind === "start").length, 1);
 }
 
 async function room(count = 2, options = {}) {
@@ -238,6 +335,244 @@ test("six-tab loop uses real Weave stack and host-service migration without repe
     await fixture.controller.stopAll();
     assert.ok(fixture.nodes.every((node) => node.state === "stopped" && !node.instance));
     await assert.rejects(fixture.controller.start("1"), /already started/);
+  } finally { await fixture.close(); }
+});
+
+test("pending WebRTC readiness keeps real Wasm progressing, then hands off exactly", integration, async () => {
+  const rtc = controlledRTC();
+  const fixture = await room(2, rtc);
+  let moving;
+  try {
+    await fixture.controller.start("1");
+    await until(() => BigInt(fixture.nodes[0].progress.sequence) > 1n);
+    moving = fixture.controller.migrate("1", "2");
+    void moving.catch(() => {});
+    await until(() => rtc.attempts.length === 1 && fixture.nodes[0].state === "connecting");
+    const before = BigInt(fixture.nodes[0].progress.sequence);
+    await until(() => BigInt(fixture.nodes[0].progress.sequence) >= before + 3n, 2000);
+    assert.equal(fixture.nodes[0].ownership, "retained");
+    assert.equal(fixture.nodes[1].instance, null);
+    assert.ok(!fixture.events.some((item) => item.type === "boundary" && item.kind === "final"));
+    rtc.attempts[0].release();
+    const result = await moving;
+    assert.equal(result.status, "succeeded");
+    await until(() => fixture.events.some((item) => item.type === "boundary" && item.kind === "resume" && item.operationId === result.id));
+    const final = fixture.events.find((item) => item.type === "boundary" && item.kind === "final" && item.operationId === result.id);
+    const resumed = fixture.events.find((item) => item.type === "boundary" && item.kind === "resume" && item.operationId === result.id);
+    assert.equal(BigInt(resumed.sequence), BigInt(final.sequence) + 1n);
+    assert.equal(BigInt(resumed.terms), BigInt(final.terms) + 32768n);
+    assert.equal(fixture.nodes[0].ownership, "retired");
+    assert.equal(fixture.nodes[1].ownership, "retained");
+  } finally {
+    for (const attempt of rtc.attempts) attempt.release();
+    await fixture.close();
+    await moving?.catch(() => {});
+  }
+});
+
+test("pending local stream readiness keeps real Wasm progressing, then hands off exactly", integration, async () => {
+  const fixture = await pendingConnection("local");
+  let moving;
+  try {
+    await fixture.controller.start("1");
+    moving = fixture.controller.migrate("1", "2");
+    void moving.catch(() => {});
+    await fixture.pending();
+    const before = BigInt(fixture.nodes[0].progress.sequence);
+    await until(() => BigInt(fixture.nodes[0].progress.sequence) >= before + 3n, 2000);
+    assert.equal(fixture.nodes[0].ownership, "retained");
+    assert.equal(fixture.nodes[1].instance, null);
+    assert.ok(!fixture.events.some((item) => item.type === "boundary" && item.kind === "final"));
+    fixture.release();
+    await assertExactHandoff(fixture, await moving);
+  } finally {
+    await fixture.close();
+    await moving?.catch(() => {});
+  }
+});
+
+for (const transport of ["webrtc", "local"]) {
+  test(`${transport} readiness rejection preserves the live source and permits explicit retry`, integration, async () => {
+    const fixture = await pendingConnection(transport);
+    let moving;
+    try {
+      await fixture.controller.start("1");
+      const original = fixture.nodes[0].instance;
+      moving = fixture.controller.migrate("1", "2");
+      void moving.catch(() => {});
+      await fixture.pending();
+      const before = BigInt(fixture.nodes[0].progress.sequence);
+      await until(() => BigInt(fixture.nodes[0].progress.sequence) >= before + 3n, 2000);
+      fixture.reject();
+      const failed = await within(moving, 2000, "A failed connection did not settle its migration command");
+      assert.equal(failed.status, "failed");
+      assert.match(failed.message, /Connection failed before commit/);
+      assert.equal(fixture.nodes[0].instance, original);
+      assert.equal(fixture.nodes[0].ownership, "retained");
+      await until(() => fixture.nodes[1].state === "idle");
+      assert.equal(fixture.nodes[1].instance, null);
+      const after = BigInt(fixture.nodes[0].progress.sequence);
+      await until(() => BigInt(fixture.nodes[0].progress.sequence) > after);
+      moving = fixture.controller.migrate("1", "2");
+      void moving.catch(() => {});
+      await fixture.pending(1);
+      fixture.release(1);
+      const result = await moving;
+      assert.notEqual(result.id, failed.id);
+      await assertExactHandoff(fixture, result);
+    } finally {
+      await fixture.close();
+      await moving?.catch(() => {});
+    }
+  });
+
+  test(`${transport} keeps computing until its unchanged 12-second readiness deadline, then permits retry`, { timeout: 20_000 }, async () => {
+    const fixture = await pendingConnection(transport);
+    let moving;
+    try {
+      await fixture.controller.start("1");
+      const started = performance.now();
+      moving = fixture.controller.migrate("1", "2");
+      void moving.catch(() => {});
+      await fixture.pending();
+      const before = BigInt(fixture.nodes[0].progress.sequence);
+      await until(() => BigInt(fixture.nodes[0].progress.sequence) >= before + 3n, 2000);
+      // Sample again near the actual deadline: advancing briefly before a
+      // later blocking callback would not prove availability while waiting.
+      await until(() => performance.now() - started >= 9000, 10_000);
+      assert.equal(fixture.nodes[0].state, "connecting");
+      const nearDeadline = BigInt(fixture.nodes[0].progress.sequence);
+      await until(() => BigInt(fixture.nodes[0].progress.sequence) >= nearDeadline + 3n, 2000);
+      const failed = await within(moving, 16_000, "The production connection deadline did not settle the command");
+      assert.ok(performance.now() - started >= 11_000, "the real 12-second deadline was not replaced by an early injected failure");
+      assert.equal(failed.status, "failed");
+      assert.equal(fixture.nodes[0].ownership, "retained");
+      assert.ok(BigInt(fixture.nodes[0].progress.sequence) > before + 3n);
+      assert.ok(!fixture.events.some((item) => item.type === "boundary" && item.kind === "final"));
+      await until(() => fixture.nodes[1].state === "idle");
+      moving = fixture.controller.migrate("1", "2");
+      void moving.catch(() => {});
+      await fixture.pending(1);
+      fixture.release(1);
+      await assertExactHandoff(fixture, await moving);
+    } finally {
+      await fixture.close();
+      await moving?.catch(() => {});
+    }
+  });
+
+  for (const action of ["stop", "close"]) {
+    test(`${transport} ${action} during pending readiness settles promptly and ignores late readiness`, integration, async () => {
+      const fixture = await pendingConnection(transport);
+      let moving;
+      try {
+        await fixture.controller.start("1");
+        moving = fixture.controller.migrate("1", "2");
+        void moving.catch(() => {});
+        await fixture.pending();
+        const source = fixture.nodes[0];
+        const link = source.outbound;
+        const record = [...source.commandRecords.values()].find((entry) => JSON.parse(entry.fingerprint)[0] === "migrate");
+        assert.ok(record, "the real node command ledger owns the pending operation");
+        if (action === "stop") {
+          await within(fixture.controller.stopAll(), 2000, "Stop All waited for connection readiness");
+          assert.equal((await within(moving, 2000, "Stop All left migrate pending")).status, "failed");
+        } else {
+          await within(source.close(), 2000, "Closing the source waited for connection readiness");
+          // A closed node cannot acknowledge over its disposed command channel,
+          // but its own command must finish and free the pending guest driver.
+          assert.equal((await within(record.promise, 2000, "Source close left its own command pending")).status, "failed");
+          await fixture.controller.close();
+          await assert.rejects(moving, /Controller closed/);
+        }
+        const stoppedSequence = source.progress.sequence;
+        fixture.release();
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(source.state, "stopped");
+        assert.equal(source.ownership, "none");
+        assert.equal(source.instance, null);
+        assert.equal(source.runner, null);
+        assert.equal(source.outbound, null);
+        assert.equal(source.links.size, 0);
+        assert.equal(link.done, true);
+        assert.notEqual(link.readyState, "ready", "late readiness revived a disposed transport");
+        assert.equal(source.progress.sequence, stoppedSequence);
+        assert.equal(fixture.nodes[1].instance, null);
+        assert.ok(!fixture.events.some((item) => item.type === "boundary" && ["final", "resume"].includes(item.kind)));
+      } finally {
+        await fixture.close();
+        await moving?.catch(() => {});
+      }
+    });
+  }
+}
+
+test("synchronous DataChannel setup failure publishes a terminal operation and disposes its observers", integration, async () => {
+  const peers = [];
+  class RefusingRTC extends FakeRTC {
+    constructor(config) {
+      super(config);
+      this.listenerTypes = new Set();
+      peers.push(this);
+    }
+    addEventListener(type, listener, options) {
+      this.listenerTypes.add(type);
+      super.addEventListener(type, listener, options);
+    }
+    createDataChannel() { throw new Error("Test native createDataChannel refused"); }
+    async getStats() { return new Map(); }
+  }
+  const fixture = await room(2, { RTCPeerConnection: RefusingRTC });
+  try {
+    await fixture.controller.start("1");
+    const original = fixture.nodes[0].instance;
+    const result = await within(fixture.controller.migrate("1", "2"), 2000,
+      "Synchronous setup failure left the controller operation pending");
+    assert.equal(result.status, "failed");
+    assert.equal(result.phase, "failed");
+    assert.match(result.message, /createDataChannel refused/);
+    assert.equal(result.connectionDiagnostics.relayConfigured, false);
+    assert.equal(fixture.controller.busy, false);
+    assert.equal(fixture.nodes[0].instance, original);
+    assert.equal(fixture.nodes[0].state, "running");
+    assert.equal(fixture.nodes[0].ownership, "retained");
+    assert.equal(fixture.nodes[0].outbound, null);
+    assert.equal(fixture.nodes[0].links.size, 0);
+    const closed = peers.filter((peer) => peer.connectionState === "closed");
+    assert.equal(closed.length, 1);
+    for (const type of closed[0].listenerTypes) {
+      assert.equal(getEventListeners(closed[0], type).length, 0, `${type} observer leaked on failed setup`);
+    }
+    const before = BigInt(fixture.nodes[0].progress.sequence);
+    await until(() => BigInt(fixture.nodes[0].progress.sequence) > before);
+    assert.equal(fixture.nodes[1].instance, null);
+  } finally { await fixture.close(); }
+  assert.ok(peers.every((peer) => peer.connectionState === "closed"));
+  for (const peer of peers) for (const type of peer.listenerTypes) {
+    assert.equal(getEventListeners(peer, type).length, 0, `${type} observer leaked after fixture cleanup`);
+  }
+});
+
+test("a new migration operation does not inherit a previous handoff's completion statistics", integration, async () => {
+  const fixture = await room();
+  try {
+    await fixture.controller.start("1");
+    const first = await fixture.controller.migrate("1", "2");
+    assert.equal(first.commitConfirmed, true);
+    await fixture.controller.migrate("2", "1");
+    const next = await fixture.controller.migrate("1", "2");
+    const connecting = fixture.events.filter((item) => item.type === "operation"
+      && item.operation.id === next.id && item.operation.phase === "connecting");
+    assert.ok(connecting.length >= 2, "both controller and source publish their new operation");
+    for (const { operation } of connecting) {
+      assert.equal(operation.status, "pending");
+      for (const key of Object.keys(first)) {
+        if (["id", "source", "target", "phase", "status", "message"].includes(key)) continue;
+        assert.equal(Object.hasOwn(operation, key), false, `new operation inherited ${key}`);
+      }
+    }
+    await assertExactHandoff(fixture, next);
   } finally { await fixture.close(); }
 });
 

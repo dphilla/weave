@@ -45,13 +45,15 @@ function optionsFrom(argv) {
   --public-path PATH   static URL path, e.g. /showcase/pi-demo.html
   --literal-ice        expose literal ICE host candidates in disposable Chrome
   --headed             run visible Chrome instead of headless Chrome
-  --quick              skip automatic-tour, suspended-target, and owner-loss cases
+  --quick              skip long signaling/freeze recovery, pending Stop, auto tour, owner loss
   --keep-profile       retain this test's temporary Chrome profile
   --help               print usage
 
 The server serves only the one HTML file, with no signaling/STUN/TURN server.
 The full-flow browser allows popups. A separate default-popup-policy browser
-checks the one-at-a-time fallback. Background timer throttling is not disabled.`);
+checks the one-at-a-time fallback. Background timer throttling is not disabled.
+WebRTC always checks live progress through a brief signaling delay; full runs
+also test signaling timeout/retry and Stop during a pending connection.`);
       return null;
     }
     if (["--literal-ice", "--keep-profile", "--headed", "--quick"].includes(flag)) {
@@ -478,6 +480,144 @@ function assertHandoff(state, source, target, boundaryCount) {
   return { source, target, final, resume };
 }
 
+// Fault injection is limited to the existing signaling boundary. Native RTC,
+// control/presence messages and the actual migration byte stream are untouched.
+async function holdWebRtcSignals(client) {
+  await client.evaluate(`(() => {
+    if (window.__PI_E2E_SIGNAL_GATE__) throw new Error('signaling gate already installed');
+    const original = BroadcastChannel.prototype.postMessage;
+    const queued = [];
+    const gate = {holding:true,intercepted:0,
+      inspect:() => ({holding:gate.holding,queued:queued.length,intercepted:gate.intercepted}),
+      restore:(flush) => {
+        gate.holding = false;
+        BroadcastChannel.prototype.postMessage = original;
+        delete window.__PI_E2E_SIGNAL_GATE__;
+        const messages = queued.splice(0);
+        if (flush) for (const {channel,message} of messages) original.call(channel,message);
+        return messages.length;
+      }};
+    BroadcastChannel.prototype.postMessage = function(message) {
+      if (gate.holding && message?.type === 'signal') {
+        if (queued.length >= 128) throw new Error('signaling test queue exceeded its bounded capacity');
+        gate.intercepted++;
+        queued.push({channel:this,message:structuredClone(message)});
+        return;
+      }
+      return original.call(this,message);
+    };
+    window.__PI_E2E_SIGNAL_GATE__ = gate;
+  })()`);
+  let restored = false;
+  return {
+    inspect: () => client.evaluate("window.__PI_E2E_SIGNAL_GATE__?.inspect() ?? null"),
+    async restore(flush = false) {
+      if (restored) return 0;
+      restored = true;
+      return client.evaluate(`window.__PI_E2E_SIGNAL_GATE__?.restore(${flush}) ?? 0`);
+    },
+  };
+}
+
+async function assertComputingWhileConnecting(browser, gate, sourceId, targetId, timeoutMs) {
+  await waitFor("native WebRTC signaling reaches the held boundary", async () => (await gate.inspect())?.queued > 0, timeoutMs);
+  await waitState(browser.controller, "source is connecting without transferring execution authority", (state) =>
+    state.busy && state.operation?.status === "pending" && state.operation?.phase === "connecting"
+      && state.nodes.find((node) => node.nodeId === sourceId)?.state === "connecting", timeoutMs);
+  // Let the source reach its next yield before the first sample. A single
+  // in-flight synchronous Wasm slice must not masquerade as continuing work.
+  await sleep(500);
+  const samples = [];
+  for (let index = 0; index < 4; index++) {
+    if (index) await sleep(1_000);
+    const state = await snapshot(browser.controller);
+    const owners = state.nodes.filter((node) => node.ownership === "retained");
+    assert.deepEqual(owners.map((node) => node.nodeId), [sourceId], "held signaling changed execution authority");
+    assert.equal(state.operation?.status, "pending", "connection finished while its signaling was held");
+    assert.equal(state.nodes.find((node) => node.nodeId === targetId)?.ownership, "none", "unconnected target acquired execution authority");
+    const source = await snapshot(browser.nodes.get(sourceId));
+    assert.equal(source.ownership, "retained");
+    assert.equal(source.state, "connecting");
+    samples.push({timestamp:Date.now(),sequence:source.progress.sequence,terms:source.progress.terms});
+  }
+  assert.ok(BigInt(samples.at(-1).sequence) > BigInt(samples[1].sequence),
+    `source Wasm stalled while WebRTC was connecting: ${JSON.stringify(samples)}`);
+  return { source:sourceId,target:targetId,heldSignals:(await gate.inspect()).intercepted,samples };
+}
+
+function assertSanitizedConnectionDiagnostics(operation) {
+  const diagnostics = operation.connectionDiagnostics;
+  assert.ok(diagnostics && typeof diagnostics === "object" && !Array.isArray(diagnostics),
+    "failed WebRTC connection omitted actionable diagnostics");
+  const enums = {
+    connectionState: ["unknown","new","connecting","connected","disconnected","failed"],
+    iceConnectionState: ["unknown","new","checking","connected","completed","disconnected","failed"],
+    iceGatheringState: ["unknown","new","gathering","complete"],
+    signalingState: ["unknown","stable","have-local-offer","have-remote-offer","have-local-pranswer","have-remote-pranswer"],
+    statsStatus: ["unavailable","pending","ready","error"],
+  };
+  const keys = [...Object.keys(enums),"localCandidates","endOfCandidates","iceErrorCount",
+    "lastIceErrorCode","candidatePairs","selectedPair","statsTruncated","relayConfigured"];
+  assert.deepEqual(Object.keys(diagnostics).sort(), keys.sort(), "connection diagnostics contain an unexpected, potentially sensitive field");
+  for (const [key, values] of Object.entries(enums)) assert.ok(values.includes(diagnostics[key]), `unsafe diagnostics enum ${key}`);
+  const boundedInteger = (value, lower, upper) => Number.isSafeInteger(value) && value >= lower && value <= upper;
+  for (const key of ["localCandidates","iceErrorCount"]) assert.ok(boundedInteger(diagnostics[key], 0, 65535), `unbounded diagnostics count ${key}`);
+  assert.ok(diagnostics.lastIceErrorCode === null || boundedInteger(diagnostics.lastIceErrorCode, 1, 65535));
+  assert.ok(diagnostics.candidatePairs === null || boundedInteger(diagnostics.candidatePairs, 0, 4096));
+  for (const key of ["endOfCandidates","statsTruncated"]) assert.equal(typeof diagnostics[key], "boolean");
+  for (const key of ["selectedPair","relayConfigured"]) assert.ok(diagnostics[key] === null || typeof diagnostics[key] === "boolean");
+  assert.equal(diagnostics.relayConfigured, false, "the server-free demo incorrectly reports a configured relay");
+  assert.match(operation.message, /Last observed WebRTC state:/, "connection failure omitted observed-state guidance");
+  assert.match(operation.message, /does not identify the cause/i, "connection failure overstates the cause");
+  assert.match(operation.message, /Same-browser mode|browser\/network configuration/i, "connection failure has no actionable next step");
+  return diagnostics;
+}
+
+async function webRtcBlackholeChecks(options, resources, browser) {
+  const dashboard = browser.controller;
+  const initial = await snapshot(dashboard);
+  const sourceId = String(assertOneOwner(initial)[0].nodeId);
+  const targetId = String(Number(sourceId) % 6 + 1);
+  const initialBoundaries = boundaries(initial).length;
+  const gate = await holdWebRtcSignals(browser.nodes.get(sourceId));
+  try {
+    const attemptStarted = Date.now();
+    await click(dashboard, `[data-migrate-to="${targetId}"]`);
+    const progress = await assertComputingWhileConnecting(browser, gate, sourceId, targetId, options.timeoutMs);
+    const failed = await waitState(dashboard, "blackholed signaling fails within the real connection deadline", (state) => {
+      assertOneOwner(state);
+      return !state.busy && state.operation?.status === "failed";
+    }, options.timeoutMs);
+    const elapsedMs = Date.now() - attemptStarted;
+    assert.ok(elapsedMs < 25_000, `blackholed connection exceeded its 12-second deadline plus scheduling allowance: ${elapsedMs}ms`);
+    assert.match(failed.operation.message, /before commit|source continues/i);
+    const diagnostics = assertSanitizedConnectionDiagnostics(failed.operation);
+    assert.equal(boundaries(failed).slice(initialBoundaries).filter((event) => ["final","resume"].includes(event.kind)).length, 0,
+      "blackholed connection crossed a migration boundary");
+    const source = await snapshot(browser.nodes.get(sourceId));
+    assert.equal(source.state, "running");
+    assert.equal(source.ownership, "retained");
+    assert.ok(BigInt(source.progress.sequence) > BigInt(progress.samples.at(-1).sequence), "source stopped progressing during the connection timeout");
+    if (resources.artifacts) await screenshot(dashboard, path.join(resources.artifacts, "connection-timeout.png"), 1200, 1000);
+    const released = await gate.restore(true);
+    await sleep(500);
+    assert.equal(boundaries(await snapshot(dashboard)).slice(initialBoundaries).filter((event) => event.kind === "resume").length, 0,
+      "late signaling revived an expired migration");
+    await activeOwner(dashboard, sourceId, options.timeoutMs);
+    await waitState(dashboard, "failed target releases its receive reservation", (state) =>
+      ["idle","retired"].includes(state.nodes.find((node) => node.nodeId === targetId)?.state), options.timeoutMs);
+    const beforeRetry = boundaries(await snapshot(dashboard)).length;
+    await click(dashboard, `[data-migrate-to="${targetId}"]`);
+    await activeOwner(dashboard, targetId, options.timeoutMs);
+    const retried = await waitState(dashboard, "explicit retry resumes the original computation", (state) =>
+      boundaries(state).slice(beforeRetry).some((event) => event.kind === "resume"), options.timeoutMs);
+    const handoff = assertHandoff(retried, sourceId, targetId, beforeRetry);
+    await assertTabIndicators(browser, resources, "retry after blackholed signaling", targetId, options.timeoutMs, { [sourceId]:"retired" });
+    resources.results.blackholedSignaling = { ...progress,elapsedMs,diagnostics,releasedStaleSignals:released,handoff };
+    log("ok: blackholed signaling times out safely with sanitized diagnostics; stale signals cannot resume it, explicit retry preserves progress");
+  } finally { await gate.restore().catch(() => {}); }
+}
+
 async function assertNoExceptions(resources) {
   for (const client of resources.clients) {
     assert.deepEqual(client.exceptions, [], `unhandled exception in ${client.target.url}`);
@@ -609,10 +749,20 @@ async function popupChecks(options, resources) {
   await activeOwner(controller, "1", options.timeoutMs);
   await assertTabIndicators(browser, resources, "popup room started", "1", options.timeoutMs);
   const boundaryCount = boundaries(await snapshot(controller)).length;
-  await click(controller, '[data-migrate-to="2"]');
-  await activeOwner(controller, "2", options.timeoutMs);
-  await waitState(controller, "popup-room real migration boundary", (value) => boundaries(value).slice(boundaryCount).some((event) => event.kind === "resume"), options.timeoutMs);
-  assertHandoff(await snapshot(controller), "1", "2", boundaryCount);
+  const delayGate = options.transport === "webrtc" ? await holdWebRtcSignals(browser.nodes.get("1")) : null;
+  try {
+    await click(controller, '[data-migrate-to="2"]');
+    if (delayGate) {
+      resources.results.delayedSignaling = await assertComputingWhileConnecting(browser, delayGate, "1", "2", options.timeoutMs);
+      if (resources.artifacts) await screenshot(controller, path.join(resources.artifacts, "connection-pending.png"), 1200, 1000);
+      resources.results.delayedSignaling.releasedSignals = await delayGate.restore(true);
+      log("ok: actual source Wasm keeps advancing through a three-second native WebRTC signaling delay");
+    }
+    await activeOwner(controller, "2", options.timeoutMs);
+    await waitState(controller, "popup-room real migration boundary", (value) => boundaries(value).slice(boundaryCount).some((event) => event.kind === "resume"), options.timeoutMs);
+    const handoff = assertHandoff(await snapshot(controller), "1", "2", boundaryCount);
+    if (delayGate) resources.results.delayedSignaling.handoff = handoff;
+  } finally { await delayGate?.restore().catch(() => {}); }
   await assertTabIndicators(browser, resources, "popup room handoff", "2", options.timeoutMs, { "1": "retired" });
   await controller.evaluate(`(() => {
     window.__PI_E2E_STOP_TITLES__ = [];
@@ -624,7 +774,19 @@ async function popupChecks(options, resources) {
         states:state.nodes.map(node => node.state)});
     }).observe(document.querySelector('title'), {subtree:true,childList:true,characterData:true});
   })()`);
-  await click(controller, "#stop-compute", 3);
+  const stopGate = options.transport === "webrtc" && !options.quick ? await holdWebRtcSignals(browser.nodes.get("2")) : null;
+  const beforePendingStop = boundaries(await snapshot(controller)).length;
+  try {
+    if (stopGate) {
+      await click(controller, '[data-migrate-to="3"]');
+      resources.results.stopWhileConnecting = await assertComputingWhileConnecting(browser, stopGate, "2", "3", options.timeoutMs);
+    }
+    await click(controller, "#stop-compute", 3);
+    if (stopGate) {
+      await waitState(controller, "pending connection is stopped in all tabs", (value) => value.stopped && !value.busy && value.nodes.every((node) => node.state === "stopped"), options.timeoutMs);
+      resources.results.stopWhileConnecting.releasedSignalsAfterStop = await stopGate.restore(true);
+    }
+  } finally { await stopGate?.restore().catch(() => {}); }
   const stopped = await waitState(controller, "Stop demo stops every compute tab", (value) => value.stopped && !value.busy && value.nodes.length === 6 && value.nodes.every((node) => node.state === "stopped"), options.timeoutMs);
   assert.ok(stopped.buttons["start-compute"].disabled || stopped.buttons["start-compute"].hidden, "stopped room offered a new Start");
   const stopStartCount = boundaries(stopped).filter((event) => event.kind === "start").length;
@@ -632,6 +794,12 @@ async function popupChecks(options, resources) {
   const stoppedSequences = new Map();
   for (const [id, client] of browser.nodes) stoppedSequences.set(id, (await snapshot(client)).progress.sequence);
   await sleep(1_500);
+  if (stopGate) {
+    assert.equal(boundaries(await snapshot(controller)).slice(beforePendingStop).filter((event) => event.kind === "resume").length, 0,
+      "signaling delivered after Stop resumed a workload");
+    resources.results.stopWhileConnecting.noLateResume = true;
+    log("ok: Stop during a pending WebRTC connection cancels all tabs; late signaling cannot resume the workload");
+  }
   assert.equal(boundaries(await snapshot(controller)).filter((event) => event.kind === "start").length, stopStartCount, "even a synthetic click on hidden Start must not restart a stopped room");
   for (const [id, client] of browser.nodes) assert.equal((await snapshot(client)).progress.sequence, stoppedSequences.get(id), `stopped tab ${id} continued host calls`);
   resources.results.stopButton = { allSixStopped: true, noFurtherProgress: true, restartDisabled: true };
@@ -794,6 +962,7 @@ async function fullFlow(options, resources) {
   }
 
   if (!options.quick) {
+    if (options.transport === "webrtc") await webRtcBlackholeChecks(options, resources, browser);
     const completedBefore = boundaries(await snapshot(dashboard)).filter((event) => event.kind === "resume").length;
     await click(dashboard, "#auto-tour");
     state = await waitState(dashboard, "automatic tour performs at least two real migrations", (state) => {

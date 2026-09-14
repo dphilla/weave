@@ -30,6 +30,7 @@ test("deployable single HTML exactly embeds current sources, Wasm, style, templa
     ["packages/browser-transports/src/index.mjs", "weave-demo:transports"],
     ["packages/webrtc-session/src/index.mjs", "weave-demo:session"],
     ["demos/pi-migration/runtime.mjs", "weave-demo:runtime"],
+    ["demos/pi-migration/rtc-diagnostics.mjs", "weave-demo:rtc-diagnostics"],
     ["demos/pi-migration/tab-stream.mjs", "weave-demo:tab-stream"],
     ["demos/pi-migration/tab-indicator.mjs", "weave-demo:tab-indicator"],
     ["demos/pi-migration/app.mjs", "weave-demo:app"],

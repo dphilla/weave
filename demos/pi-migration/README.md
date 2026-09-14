@@ -126,10 +126,31 @@ Select **WebRTC · network dependent** before opening any tabs to use the
 existing reliable ordered DataChannel transport and WebRTC session library.
 This mode still uses local BroadcastChannel signaling and configures
 `iceServers: []`: it does **not** connect separate devices. Local ICE connectivity
-must work. Normal Chrome on the development machine failed to resolve its
-`.local` mDNS ICE candidates in both headed and headless tests. A separate test
-with literal-ICE browser flags verified the actual WebRTC handoff path; those
-flags are diagnostic, **not a requirement for the default presentation mode**.
+must work. Normal Chrome on the development machine has failed to resolve its
+`.local` mDNS ICE candidates in both headed and headless tests. The same failure
+was observed without Weave, but its underlying browser/OS/network cause was not
+isolated; Wi-Fi changes during testing are also possible context. Tests with
+literal-ICE browser flags verified the WebRTC handoff path. Those flags are
+diagnostic, **not a deployment fix or a requirement for the default presentation
+mode**, and change browser address-privacy behavior.
+
+While the transport is connecting, the source keeps calculating with retained
+ownership. Connection failure does not start another executor; wait for the
+target to become available and explicitly retry. Stop cancels a pending
+connection, and late signaling cannot restart a stopped workload. The subsequent
+Weave handshake, page-copy operations and final safe-point handoff retain their
+normal protocol waits; this is not a zero-pause guarantee for the entire transfer.
+
+WebRTC terminal operation records include `connectionDiagnostics`: bounded,
+last-observed connection/gathering states, candidate counts, candidate-pair
+availability and numeric ICE error information. These summaries deliberately
+exclude SDP, candidate addresses/hostnames, credentials and server URLs. They
+are retained before cleanup, including when no candidate pair was selected;
+unavailable or pending statistics are labeled as such, not interpreted as zero.
+The failed-operation message includes a short explanation of that observed
+stage. A timeout alone does not prove an mDNS failure, and not every browser
+resolution failure emits a JavaScript ICE-error event. These are diagnostics,
+not automatic repair or a silent change of transport.
 
 The repository's other examples demonstrate server/runtime and browser/native
 migrations. See [browser ↔ browser WebRTC](../browser-webrtc/README.md),

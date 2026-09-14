@@ -46,6 +46,8 @@ fn main() {
     let build = out.join("wamr-build");
     let install = out.join("wamr-install");
     let patched = out.join("weave-wamr-compat");
+    let native_source = out.join("wamr-source");
+    build_inputs::prepare_source(&root, &native_source);
     compat::prepare(&root, &patched);
 
     run(
@@ -54,12 +56,23 @@ fn main() {
             .arg(&manifest)
             .arg("-B")
             .arg(&build)
-            .arg(format!("-DWAMR_ROOT_DIR={}", root.display()))
+            .arg(format!("-DWAMR_ROOT_DIR={}", native_source.display()))
             .arg(format!("-DWEAVE_WAMR_COMPAT_DIR={}", patched.display()))
             .arg(format!("-DCMAKE_INSTALL_PREFIX={}", install.display()))
             .arg("-DCMAKE_BUILD_TYPE=Release"),
         "WAMR CMake configure",
     );
+    // CMake install can skip a changed same-size archive rebuilt within the
+    // same timestamp second. Never leave that stale copy available for linking.
+    let archive = install.join("lib/libweave_wamr_vmlib.a");
+    match std::fs::remove_file(&archive) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!(
+            "remove previous WAMR install {}: {error}",
+            archive.display()
+        ),
+    }
     run(
         Command::new("cmake")
             .arg("--build")

@@ -6,6 +6,25 @@ import { loadPiWasm } from "./test-fixture.mjs";
 
 let wasmBytes;
 function wasm() { return wasmBytes ??= loadPiWasm(); }
+function finitePiWasm() {
+  // Keep the genuine transformed arithmetic, nested frames and polls, changing
+  // only Pi's 2^51-pair termination bound to 2^20 pairs (64 host progress calls).
+  // Fixed-width signed LEB preserves every section size and code offset. This
+  // also exercises natural completion in the deliberately CLI-free JS lane.
+  const bytes = wasm().slice();
+  const originalLimit = Buffer.from([0x42, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x04]);
+  const offset = Buffer.from(bytes).indexOf(originalLimit);
+  assert.ok(offset >= 0, "transformed Pi must contain its documented i64 pair bound");
+  assert.equal(Buffer.from(bytes).indexOf(originalLimit, offset + 1), -1, "the loop-limit instruction must be unambiguous");
+  let limit = 1n << 20n;
+  for (let index = 1; index < originalLimit.length; index++) {
+    bytes[offset + index] = Number(limit & 127n) | (index + 1 < originalLimit.length ? 0x80 : 0);
+    limit >>= 7n;
+  }
+  assert.equal(limit, 0n);
+  assert.equal(WebAssembly.validate(bytes), true);
+  return bytes;
+}
 const integration = { timeout: 15_000 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function until(predicate, timeout = 5000) {
@@ -230,9 +249,9 @@ function controlledRTC() {
   return { attempts, RTCPeerConnection: DelayedRTC };
 }
 
-async function pendingConnection(transport) {
+async function pendingConnection(transport, options = {}) {
   const rtc = controlledRTC();
-  const fixture = await room(2, { transport, RTCPeerConnection: rtc.RTCPeerConnection });
+  const fixture = await room(2, { ...options, transport, RTCPeerConnection: rtc.RTCPeerConnection });
   const held = [];
   const observedChannels = new Set();
   if (transport === "local") fixture.bus.drop = (message) => {
@@ -392,6 +411,52 @@ test("pending local stream readiness keeps real Wasm progressing, then hands off
 });
 
 for (const transport of ["webrtc", "local"]) {
+  test(`${transport} natural guest completion settles a pending handoff without a late resume`, integration, async () => {
+    const fixture = await pendingConnection(transport, { wasmBytes: finitePiWasm() });
+    let moving;
+    try {
+      const source = fixture.nodes[0];
+      const launch = source._launch.bind(source);
+      source._launch = (inst, ...args) => {
+        // Public poll-count mode guarantees a genuine initial unwind even on
+        // machines that could finish this bounded guest within one time slice.
+        inst.pollMode = { afterPolls: 1 };
+        launch(inst, ...args);
+      };
+      await fixture.controller.start("1");
+      moving = fixture.controller.migrate("1", "2");
+      void moving.catch(() => {});
+      await fixture.pending();
+      const link = source.outbound;
+      source.instance.pollMode = "run";
+      await until(() => source.state === "stopped" && source.runner === null);
+      assert.equal(source.progress.sequence, "64", "the real guest returned after exactly 64 progress calls");
+      assert.equal(source.progress.terms, "2097152");
+      const result = await within(moving, 2000, "Natural guest completion left the public migration command pending");
+      assert.equal(result.status, "failed");
+      assert.equal(result.phase, "failed");
+      assert.match(result.message, /complet|finish|ended/i);
+      assert.equal(fixture.controller.busy, false);
+      assert.equal(fixture.controller.pendingCommands.size, 0);
+      assert.equal(source.ownership, "none");
+      assert.equal(source.instance, null);
+      assert.equal(source.outbound, null);
+      assert.equal(source.links.size, 0);
+      assert.equal(link.done, true);
+      fixture.release();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(source.state, "stopped");
+      assert.equal(source.progress.sequence, "64");
+      assert.equal(fixture.nodes[1].instance, null);
+      assert.notEqual(link.readyState, "ready");
+      assert.ok(!fixture.events.some((item) => item.type === "boundary" && ["final", "resume"].includes(item.kind)));
+    } finally {
+      await fixture.close();
+      await moving?.catch(() => {});
+    }
+  });
+
   test(`${transport} readiness rejection preserves the live source and permits explicit retry`, integration, async () => {
     const fixture = await pendingConnection(transport);
     let moving;

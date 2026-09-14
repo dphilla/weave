@@ -658,7 +658,15 @@ export class TabRuntime {
           }
           return "continue";
         }, { signal: controller.signal });
-        if (outcome.status === "done") { this._setState("stopped", "none"); return; }
+        if (outcome.status === "done") {
+          this._setState("stopped", "none");
+          // A finite guest can finish while transport readiness is pending.
+          // There is no continuation left to hand off, but its caller still
+          // needs a terminal result and the connection must be released.
+          if (this.outbound) this._completeOutbound(this.outbound, { phase: "failed", status: "failed",
+            message: "Source computation completed before handoff; no handoff occurred" });
+          return;
+        }
         this._setState("finalizing", "unknown");
         this._setOperation({ phase: "finalizing", message: "Pausing at a safe point; transferring stack, globals and host-service state" });
         this._publishBoundary("final", link.id);

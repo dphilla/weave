@@ -19,10 +19,13 @@ const PINNED: &str = include_str!("../WAMR_VERSION");
 const HEADER: &str = "#define HEADER_MARKER 10\n";
 const SOURCE: &str = "#include \"wasm_export.h\"\nint weave_fixture_marker(void) { return 1 + HEADER_MARKER + CMAKE_MARKER; }\n";
 const EXTERNAL_CMAKE: &str = "set(FIXTURE_CMAKE_MARKER 100)\n";
-const CMAKE: &str = r#"cmake_minimum_required(VERSION 3.16)
+const CMAKE: &str = r#"cmake_minimum_required(VERSION 3.14)
 project(weave_build_tracking C)
-include("${WAMR_ROOT_DIR}/fixture.cmake")
-add_library(weave_wamr_vmlib STATIC "${WAMR_ROOT_DIR}/native/marker.c")
+include("${WAMR_ROOT_DIR}/build-scripts/fixture.cmake")
+# Upstream WAMR generates a header under its source root while configuring.
+# The real build script must give CMake a staging tree, not the verified input.
+configure_file("${WAMR_ROOT_DIR}/core/config-template.h.in" "${WAMR_ROOT_DIR}/core/generated.h" @ONLY)
+add_library(weave_wamr_vmlib STATIC "${WAMR_ROOT_DIR}/core/native/marker.c")
 target_include_directories(weave_wamr_vmlib PRIVATE "${WAMR_ROOT_DIR}/core/iwasm/include")
 target_compile_definitions(weave_wamr_vmlib PRIVATE CMAKE_MARKER=${FIXTURE_CMAKE_MARKER})
 install(TARGETS weave_wamr_vmlib ARCHIVE DESTINATION lib)
@@ -70,10 +73,11 @@ impl Fixture {
         fs::create_dir(&repository).unwrap();
         fs::write(fixture.base.join("empty git config"), "").unwrap();
         fixture.write_source("core/iwasm/include/wasm_export.h", HEADER);
-        fixture.write_source("native/marker.c", SOURCE);
-        fixture.write_source("fixture.cmake", EXTERNAL_CMAKE);
+        fixture.write_source("core/native/marker.c", SOURCE);
+        fixture.write_source("build-scripts/fixture.cmake", EXTERNAL_CMAKE);
+        fixture.write_source("core/config-template.h.in", "#define GENERATED_VALUE 0\n");
         fixture.write_source(
-            "native/deep/tracked.txt",
+            "core/native/deep/tracked.txt",
             "keeps a deep directory present\n",
         );
         fixture.git(&["init", "--quiet", "--template="]);
@@ -218,11 +222,28 @@ impl Fixture {
     }
 
     fn succeeds(&self, allow_untested: bool, expected: i32) {
+        let core_modified = fs::metadata(self.source.join("core"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert!(!self.source.join("core/generated.h").exists());
         let result = self.build(allow_untested);
         assert!(
             result.status.success(),
             "Cargo failed:\n{}",
             String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            !self.source.join("core/generated.h").exists(),
+            "CMake generated a header in the verified source tree"
+        );
+        assert_eq!(
+            fs::metadata(self.source.join("core"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            core_modified,
+            "CMake changed the verified source directory timestamp"
         );
         let binary = self.target.join("debug").join(format!(
             "weave-build-tracking-probe{}",
@@ -303,7 +324,7 @@ fn source_tracking(linked: bool) {
     f.unchanged(false, 111);
     for (path, original, edited, expected) in [
         (
-            "native/marker.c",
+            "core/native/marker.c",
             SOURCE,
             SOURCE.replace("return 1 +", "return 2 +"),
             112,
@@ -315,7 +336,7 @@ fn source_tracking(linked: bool) {
             121,
         ),
         (
-            "fixture.cmake",
+            "build-scripts/fixture.cmake",
             EXTERNAL_CMAKE,
             EXTERNAL_CMAKE.replace("100", "200"),
             211,
@@ -331,16 +352,16 @@ fn source_tracking(linked: bool) {
     }
     for addition in [
         "untracked.txt",
-        "native/deep/new directory/another level/untracked.c",
+        "core/native/deep/new directory/another level/untracked.c",
     ] {
         f.write_source(addition, "an untracked input\n");
         f.rejects("WAMR_ROOT is dirty");
         fs::remove_file(f.source.join(addition)).unwrap();
         f.succeeds(false, 111);
     }
-    fs::remove_file(f.source.join("native/marker.c")).unwrap();
+    fs::remove_file(f.source.join("core/native/marker.c")).unwrap();
     f.rejects("WAMR_ROOT is dirty");
-    f.write_source("native/marker.c", SOURCE);
+    f.write_source("core/native/marker.c", SOURCE);
     f.succeeds(false, 111);
     fs::remove_file(f.source.join("core/iwasm/include/wasm_export.h")).unwrap();
     f.rejects("does not contain core/iwasm/include/wasm_export.h");
@@ -351,6 +372,10 @@ fn source_tracking(linked: bool) {
 
 fn metadata_tracking(linked: bool) {
     let f = Fixture::new(linked);
+    metadata_checks(&f);
+}
+
+fn metadata_checks(f: &Fixture) {
     f.succeeds(false, 111);
     let pinned_commit = f.git(&["rev-parse", "HEAD"]);
     let parent = f.git(&["rev-parse", "HEAD^"]);
@@ -389,4 +414,86 @@ fn ordinary_checkout_git_metadata_invalidates_warm_cargo() {
 #[test]
 fn linked_worktree_git_metadata_invalidates_warm_cargo() {
     metadata_tracking(true);
+}
+
+#[test]
+fn relative_separate_git_directory_invalidates_warm_cargo() {
+    let f = Fixture::new(false);
+    let metadata = f.base.join("separate git metadata");
+    f.git(&[
+        "init",
+        "--quiet",
+        "--separate-git-dir",
+        metadata.to_str().unwrap(),
+    ]);
+    fs::write(f.source.join(".git"), "gitdir: ../separate git metadata\n").unwrap();
+    assert!(f.source.join(".git").is_file());
+    metadata_checks(&f);
+}
+
+#[test]
+fn restored_external_git_metadata_revalidates_an_override_build() {
+    let f = Fixture::new(false);
+    let metadata = f.base.join("separate git metadata");
+    f.git(&[
+        "init",
+        "--quiet",
+        "--separate-git-dir",
+        metadata.to_str().unwrap(),
+    ]);
+    fs::write(f.source.join(".git"), "gitdir: ../separate git metadata\n").unwrap();
+    f.succeeds(false, 111);
+    let saved = f.base.join("temporarily unavailable metadata");
+    fs::rename(&metadata, &saved).unwrap();
+    f.rejects("could not verify WAMR_ROOT git tag");
+    f.succeeds(true, 111);
+    let before = f.build_runs();
+    fs::rename(&saved, &metadata).unwrap();
+    f.succeeds(true, 111);
+    assert!(
+        f.build_runs() > before,
+        "restoring the same external metadata path must rerun validation"
+    );
+    f.succeeds(false, 111);
+    f.unchanged(false, 111);
+}
+
+#[cfg(unix)]
+#[test]
+fn retargeted_source_symlink_uses_a_preexisting_second_checkout() {
+    use std::os::unix::fs::symlink;
+    let mut f = Fixture::new(false);
+    let first = f.source.clone();
+    let second = f.base.join("second source checkout");
+    let result = f.run(
+        f.command("git")
+            .args(["clone", "--quiet", "--no-hardlinks"])
+            .arg(&first)
+            .arg(&second),
+        "git-clone",
+    );
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    f.source = second.clone();
+    f.write_source(
+        "core/native/marker.c",
+        &SOURCE.replace("return 1 +", "return 3 +"),
+    );
+    f.git(&["add", "."]);
+    f.git(&["commit", "--quiet", "-m", "second native marker"]);
+    f.git(&["tag", "-f", PINNED.trim()]);
+    // Finish creating BOTH trees before the initial Cargo build. Retargeting
+    // must invalidate via the symlink, not incidentally new source timestamps.
+    let alias = f.base.join("source alias");
+    symlink(&first, &alias).unwrap();
+    f.source = alias.clone();
+    f.succeeds(false, 111);
+    f.unchanged(false, 111);
+    fs::remove_file(&alias).unwrap();
+    symlink(&second, &alias).unwrap();
+    f.succeeds(false, 113);
+    f.unchanged(false, 113);
 }

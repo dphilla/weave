@@ -15,13 +15,17 @@ pub fn prepare_source(root: &Path, out: &Path) {
         .unwrap()
         .canonicalize()
         .expect("resolve Cargo output directory");
+    let destination = output_parent.join(out.file_name().unwrap());
     let output = if out.exists() {
         out.canonicalize().expect("resolve WAMR source mirror")
     } else {
-        output_parent.join(out.file_name().unwrap())
+        destination.clone()
     };
     assert!(
-        !output.starts_with(&source) && !source.starts_with(&output),
+        !output.starts_with(&source)
+            && !source.starts_with(&output)
+            && !destination.starts_with(&source)
+            && !source.starts_with(&destination),
         "Cargo build output must be outside and disjoint from WAMR_ROOT to avoid modifying watched source"
     );
     if out.exists() {
@@ -88,11 +92,22 @@ pub fn watch(root: &Path) {
             metadata.push(git_dir);
         }
     }
-    metadata.extend(
-        ["--git-common-dir", "--git-dir"]
-            .into_iter()
-            .filter_map(|option| git_path(root, option)),
-    );
+    let resolved: Vec<_> = ["--git-common-dir", "--git-dir"]
+        .into_iter()
+        .filter_map(|option| git_path(root, option))
+        .collect();
+    if resolved.len() != 2 || metadata.iter().any(|path| !path.exists()) {
+        // A repaired/moved-back git directory may retain timestamps older than
+        // this build. A previously missing directory watch alone cannot detect
+        // that repair. Intentionally keep unverified override builds dirty with
+        // a never-created, build-local sentinel; a verified rerun drops it.
+        let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo OUT_DIR"));
+        println!(
+            "cargo:rerun-if-changed={}",
+            out.join("weave-wamr-unverified-git-recheck").display()
+        );
+    }
+    metadata.extend(resolved);
     // Do not use a lexical starts_with(root) containment check here:
     // a relative gitdir can resolve through `..` outside the checkout.
     metadata.sort();

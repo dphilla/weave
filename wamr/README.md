@@ -27,7 +27,10 @@ vendored. The build compiles a static fast interpreter with bulk memory, SIMD,
 reference types, and multiple memories enabled. SIMD uses SIMDe v0.8.2,
 downloaded by CMake at immutable commit
 `71fd833d9666141edcd1d3c109a80e228303d8d7`; the first build needs GitHub access.
-`compat.rs` generates checked adaptations of three WAMR source files in the
+The build first validates the external checkout, then copies its `core` and
+`build-scripts` inputs into a private Cargo build-directory mirror. WAMR's CMake
+version-header generation runs there, not in the verified checkout.
+`compat.rs` also generates checked adaptations of three WAMR source files in the
 Cargo build directory. These retain memory indices in fast bytecode for scalar
 and SIMD accesses, memory size/growth, and bulk operations, filling WAMR
 2.4.4's fast-interpreter multi-memory gaps. Explicit bounds checks remain
@@ -36,8 +39,27 @@ On Darwin, WAMR's native stack guard-page optimization
 is disabled because its `alloca`-based stack walk conflicts with Rust's own
 guard; WAMR's interpreter operand/call-stack bounds checks remain enabled.
 Because the adapter contains a small handwritten C ABI, the build rejects a
-different or unverifiable WAMR tag. Set `WEAVE_WAMR_ALLOW_UNTESTED=1` only
-when deliberately accepting that ABI risk.
+different or unverifiable WAMR tag, or a dirty checkout. Set
+`WEAVE_WAMR_ALLOW_UNTESTED=1` only when deliberately accepting that ABI risk.
+
+Cargo watches the external source directory and its Git metadata, including
+linked worktrees and separate Git directories. Editing, adding, or removing
+inputs at the same `WAMR_ROOT` path reruns validation; explicitly permitted
+development edits regenerate the native build. Unchanged builds remain
+incremental, except explicitly allowed checkouts with missing/unresolved Git
+metadata: those deliberately revalidate until repaired. Git validation disables
+optional index refreshes. After an actual invalidation, the native objects are
+rebuilt and the installed archive refreshed even for same-size, same-second
+changes; CMake's separate configuration and dependency-download caches are kept.
+This uses Cargo's normal modification-time tracking, not content attestation;
+if an external tool preserves or backdates timestamps, use a clean build.
+
+Keep Cargo/CMake outputs outside the WAMR source and Git metadata directories.
+The source mirror must be disjoint from the original checkout; overlapping
+paths are rejected before replacing any mirror. `WAMR_ROOT` itself may be a
+symlink, but files/directories inside its `core` and `build-scripts` inputs must
+be regular files/directories so generated writes cannot follow links back into
+external state.
 
 Instantiation executes no guest functions. In particular, WAMR's automatic
 `__post_instantiate` and `__wasm_call_ctors` calls are disabled in the generated
@@ -149,3 +171,19 @@ remain dormant during fresh and incoming instantiation.
 transformed looping guest. It checks failed-attempt replay, a confirmed native
 handoff, process epoch changes, and a loopback proxy that pauses COMMIT then
 drops COMMIT_OK. All nodes are terminated and reaped by the test harness.
+
+`tests/build_tracking.rs` runs the real build script through warm Cargo caches,
+using disposable Git checkouts and a tiny CMake/C/FFI executable. These offline
+fixtures check source/header/CMake changes, Git/worktree metadata, explicit
+overrides, recovery, and unchanged-build reuse. They isolate build orchestration;
+the runtime tests and migration conformance separately exercise actual WAMR.
+`tests/source_mirror.rs` checks mirror refresh, source immutability, and path/link
+safety. Both run automatically in the existing WAMR CI test command:
+
+```sh
+WAMR_ROOT=/tmp/wamr cargo test --locked --manifest-path wamr/Cargo.toml
+```
+
+To run only these build regressions, append
+`--test build_tracking --test source_mirror`. Build-tracking fixture logs are
+retained on failure; `WEAVE_CI_KEEP_TEMP=1` also retains successful fixtures.

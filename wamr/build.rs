@@ -77,6 +77,10 @@ fn main() {
         Command::new("cmake")
             .arg("--build")
             .arg(&build)
+            // Make generators can miss same-second edits even after Cargo
+            // detected them. Rebuild native objects on actual invalidation;
+            // unchanged Cargo builds never reach this command.
+            .arg("--clean-first")
             .arg("--target")
             .arg("install")
             .arg("--config")

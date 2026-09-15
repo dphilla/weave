@@ -177,7 +177,9 @@ export class TabRuntime {
     const nodes = [...this.peers.values()].filter((peer) => peer.role === "node").map((peer) => ({
       ...peer, progress: { ...peer.progress }, online: !peer.closed && now - peer.lastSeen < 15_000,
       ownership: peer.closed || now - peer.lastSeen >= 15_000 ? "unknown" : peer.ownership,
-      duplicate: [...this.peers.values()].some((other) => other.role === "node" && other.nodeId === peer.nodeId && other.instanceId !== peer.instanceId && !other.closed),
+      // An acknowledged departure is historical, not a competing live epoch.
+      // Merely quiet peers still count: silence does not prove they are gone.
+      duplicate: !peer.closed && [...this.peers.values()].some((other) => other.role === "node" && other.nodeId === peer.nodeId && other.instanceId !== peer.instanceId && !other.closed),
     })).sort((a, b) => Number(a.nodeId) - Number(b.nodeId) || a.instanceId.localeCompare(b.instanceId));
     return {
       role: this.role, nodeId: this.nodeId, instanceId: this.instanceId, transport: this.transport,
@@ -271,8 +273,9 @@ export class TabRuntime {
       }
       if (this.role === "node" && peer.role === "node" && peer.nodeId === this.nodeId) {
         this.error = `Tab ${this.nodeId} is open more than once. Close the duplicate and use a fresh room.`;
-        // A duplicate cannot retire a running workload; prohibit new commands.
-        if (!this.instance && !this.incoming && this.state !== "duplicate") this._setState("duplicate", "none");
+        // A duplicate cannot retire a running workload or undo terminal Stop;
+        // retain the room error to prohibit new commands in either case.
+        if (!this.instance && !this.incoming && !["duplicate", "stopped"].includes(this.state)) this._setState("duplicate", "none");
       }
       // A foreground dashboard probes all nodes. Reply from this message task
       // so idle background tabs are not marked lost merely because Chrome has

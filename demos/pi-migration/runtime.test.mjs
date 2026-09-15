@@ -706,6 +706,95 @@ test("duplicate slots and controller epochs fail closed", integration, async () 
   } finally { await duplicate?.close(); await controller?.close(); await fixture.close(); }
 });
 
+for (const transport of ["local", "webrtc"]) {
+  test(`${transport}: a closed destination epoch is not a duplicate of its replacement`, integration, async () => {
+    const fixture = await room(2, { transport });
+    let replacement;
+    try {
+      await fixture.controller.start("1");
+      const original = fixture.nodes[1];
+      await original.close();
+      await until(() => fixture.controller.getSnapshot().nodes.find((node) => node.instanceId === original.instanceId)?.closed);
+      replacement = new TabRuntime({ room: fixture.controller.room, role: "node", nodeId: "2",
+        wasmBytes: wasm(), transport, channelFactory: fixture.bus.open, RTCPeerConnection: FakeRTC });
+      await replacement.init();
+      await until(() => fixture.controller.getSnapshot().nodes.some((node) => node.instanceId === replacement.instanceId && node.online));
+      const snapshots = fixture.controller.getSnapshot().nodes;
+      assert.equal(snapshots.find((node) => node.instanceId === original.instanceId).duplicate, false,
+        "a closed historical peer must not make the UI block a healthy replacement");
+      assert.equal(snapshots.find((node) => node.instanceId === replacement.instanceId).duplicate, false);
+      const result = await fixture.controller.migrate("1", "2");
+      assert.equal(result.status, "succeeded");
+      await until(() => fixture.events.some((item) => item.type === "boundary" && item.kind === "resume" && item.operationId === result.id));
+      const final = fixture.events.find((item) => item.kind === "final" && item.operationId === result.id);
+      const resume = fixture.events.find((item) => item.kind === "resume" && item.operationId === result.id);
+      assert.equal(BigInt(resume.sequence), BigInt(final.sequence) + 1n);
+      assert.equal(BigInt(resume.terms), BigInt(final.terms) + 32768n);
+      assert.equal(fixture.nodes[0].ownership, "retired");
+      assert.equal(replacement.ownership, "retained");
+      assert.equal(original.instance, null);
+      assert.equal(fixture.events.filter((item) => item.kind === "start").length, 1);
+      // Silence is not a confirmed close: the existing conservative guard
+      // must still reject duplicate epochs when one peer is merely quiet.
+      const historical = fixture.controller.peers.get(original.instanceId);
+      historical.closed = false;
+      historical.lastSeen = Date.now() - 20_000;
+      assert.ok(fixture.controller.getSnapshot().nodes.filter((node) => node.nodeId === "2").every((node) => node.duplicate));
+      await assert.rejects(fixture.controller.migrate("2", "1"), /duplicated/);
+      historical.closed = true;
+      await fixture.controller.stopAll();
+      assert.equal(replacement.state, "stopped");
+    } finally { await replacement?.close(); await fixture.close(); }
+  });
+
+  test(`${transport}: duplicate presence cannot overwrite acknowledged terminal Stop`, integration, async () => {
+    const fixture = await room(2, { transport });
+    const duplicates = [];
+    const openDuplicate = async (nodeId) => {
+      const node = new TabRuntime({ room: fixture.controller.room, role: "node", nodeId,
+        wasmBytes: wasm(), transport, channelFactory: fixture.bus.open, RTCPeerConnection: FakeRTC });
+      duplicates.push(node);
+      await node.init();
+      await until(() => node.state === "duplicate");
+      return node;
+    };
+    try {
+      await fixture.controller.start("1");
+      const duplicate = await openDuplicate("2");
+      await until(() => fixture.nodes[1].state === "duplicate");
+      await assert.rejects(fixture.controller.migrate("1", "2"), /duplicated/);
+      const before = BigInt(fixture.nodes[0].progress.sequence);
+      await until(() => BigInt(fixture.nodes[0].progress.sequence) > before);
+      assert.equal(fixture.nodes[0].ownership, "retained", "duplicate detection must not retire the live source");
+      assert.deepEqual(await fixture.controller.stopAll(), { stopped: 3 });
+      const stoppedNodes = [...fixture.nodes, duplicate];
+      const progress = stoppedNodes.map((node) => ({ ...node.progress }));
+      // A new duplicate and normal repeated presence arrive after Stop ACKs.
+      // These must remain visible as a room error without reviving node state.
+      await openDuplicate("1");
+      for (let round = 0; round < 3; round++) {
+        fixture.controller._presence();
+        for (const node of [...fixture.nodes, ...duplicates]) node._presence();
+        await sleep(5);
+      }
+      for (const [index, node] of stoppedNodes.entries()) {
+        assert.equal(node.state, "stopped", "duplicate presence overwrote terminal Stop");
+        assert.equal(node.ownership, "none");
+        assert.equal(node.everStarted, true);
+        assert.equal(node.instance, null);
+        assert.equal(node.runner, null);
+        assert.equal(node.links.size, 0);
+        assert.deepEqual(node.progress, progress[index]);
+      }
+      assert.equal(fixture.events.filter((item) => item.type === "boundary" && item.kind === "start").length, 1);
+      await assert.rejects(fixture.controller.start("1"), /already started/);
+      for (const node of stoppedNodes) await assert.rejects(node._handleCommand("start"), /cannot accept|more than once/);
+      await fixture.controller.stopAll(); // Stop also remains idempotent with duplicates.
+      assert.ok([...fixture.nodes, ...duplicates].every((node) => node.state === "stopped"));
+    } finally { await Promise.all(duplicates.map((node) => node.close())); await fixture.close(); }
+  });
+}
+
 test("failed pre-copy retains source ownership and a second migration succeeds", integration, async () => {
   const fixture = await room();
   try {

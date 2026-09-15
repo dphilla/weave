@@ -153,7 +153,7 @@ deadline = active_started + timeout
 result = ""
 status = 124
 
-while True:
+while time.monotonic() < deadline:
     matched, result = check()
     if matched:
         status = 0

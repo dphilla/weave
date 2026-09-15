@@ -30,9 +30,8 @@ def stop_process_group(process, grace_seconds=2.0):
             except ProcessLookupError:
                 break
             except PermissionError:
-                # A group probe can transiently return EPERM while macOS is
-                # retiring a signaled process. It does not prove absence;
-                # retain the bounded wait and any eventual real kill error.
+                # Permission denial does not prove absence. Retain the
+                # bounded wait and surface any eventual real kill error.
                 pass
             remaining = deadline - time.monotonic()
             if remaining <= 0:

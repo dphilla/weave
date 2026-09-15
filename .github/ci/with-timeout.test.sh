@@ -62,6 +62,15 @@ with tempfile.TemporaryDirectory(prefix='weave-deadline-test.') as temporary:
     assert result.returncode == 124, result
     passed('matching text from a failing command is not a false pass')
 
+    result = run('wait-for', '.2', [sys.executable, '-c', 'import time; print("partial progress", flush=True); time.sleep(60)'])
+    assert result.returncode == 124 and result.stdout == 'partial progress\n', result
+    passed('hung output check times out and preserves partial progress')
+
+    for name in helpers:
+        result = run(name, '2', [str(folder / 'missing-command')])
+        assert result.returncode != 0, result
+        passed(f'{name} does not turn a missing command into success')
+
     # This witness is outside all tested command groups. Cleanup must leave it
     # untouched, including when a child in the target group ignores SIGTERM.
     witness = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])

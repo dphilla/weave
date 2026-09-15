@@ -30,6 +30,8 @@ Cargo behavior unless the caller sets that variable too.
 | `typecheck.sh` | Pack and clean-install authenticated rendezvous, strictly compile browser/Node/custom-provider consumers, and execute the Node consumer |
 | `typecheck/package.json`, `typecheck/package-lock.json` | Exact CI-only TypeScript and Node declaration dependencies; no product dependencies |
 | `with-timeout.sh` | Portable process-group timeout and forced cleanup |
+| `process_group.py` | Shared bounded cleanup of the exact isolated child process group |
+| `with-timeout.test.sh` | Real-process deadlines, interruption, descendant cleanup, invalid limits, and failure propagation for both deadline helpers |
 | `wait-for.sh` | Suspend-safe process, output, and event condition waits |
 | `wait-for.test.sh` | Isolated condition success and active-time timeout checks |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
@@ -55,8 +57,21 @@ Cargo behavior unless the caller sets that variable too.
 | `spec-corpus-inputs.py` | Validate extraction manifests and record/check exact corpus input hashes |
 | `spec-corpus.test.sh` | Corpus classification regression checks with deterministic fake tools |
 | `qualification.sh` | Deterministic, non-publishing runtime qualification composition |
+| `qualification.test.sh` | Isolated 18-lane ordering, per-lane failure propagation, artifact routing, and final pipeline regression checks |
 | `check-workflows.sh` | Per-file shell syntax, action SHA pins, CI harness tests, and pinned actionlint validation |
 | `check-workflows.test.sh` | Isolated valid/broken repositories proving syntax and action-pin checks reject regressions |
+
+The deadline helpers require finite positive timeouts. An `output-contains`
+probe shares `wait-for.sh`'s remaining monotonic execution budget: a hung probe
+cannot bypass the outer deadline. Timeout and interruption send TERM to the
+exact process group created for that command, then allow at most two additional
+active seconds before KILL. Cleanup follows the group even when its leader
+exits first, and repeated cancellation does not interrupt that cleanup. This
+is not a process sandbox: deliberately detached sessions are outside its scope,
+and ordinary successful command completion does not sweep background processes.
+The workflow gate runs real-process regressions for both helpers and isolated
+failure injection at every qualification stage; these fixture tests do not
+replace the actual language, runtime, and browser lanes.
 
 Each script supports `--help` where it has options. Scripts use argv arrays,
 finite waits, exact child PIDs, and caller-selected artifact directories. They

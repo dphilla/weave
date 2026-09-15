@@ -14,13 +14,20 @@ EOF
   exit 2
 }
 
-exec python3 - "$@" <<'PY'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 - "$SCRIPT_DIR" "$@" <<'PY'
 import errno
+import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv.pop(1))
+from process_group import stop_process_group
 
 
 def usage(message=None):
@@ -39,12 +46,23 @@ try:
     timeout = float(sys.argv[1])
 except (IndexError, ValueError):
     usage("timeout must be a number")
-if timeout <= 0:
-    usage("timeout must be positive")
+if not math.isfinite(timeout) or timeout <= 0:
+    usage("timeout must be finite and positive")
 
 mode = sys.argv[2]
 arguments = sys.argv[3:]
 interval = 0.05
+active_check = None
+
+
+def interrupted(signum, _frame):
+    if active_check is not None:
+        stop_process_group(active_check)
+    raise SystemExit(128 + signum)
+
+
+signal.signal(signal.SIGINT, interrupted)
+signal.signal(signal.SIGTERM, interrupted)
 
 if mode == "process":
     if len(arguments) != 1:
@@ -99,15 +117,32 @@ elif mode == "output-contains":
     command = arguments[1:]
 
     def check():
-        completed = subprocess.run(
+        global active_check
+        active_check = subprocess.Popen(
             command,
+            start_new_session=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
             errors="replace",
-            check=False,
         )
-        return completed.returncode == 0 and needle in completed.stdout, completed.stdout
+        try:
+            try:
+                output, _ = active_check.communicate(
+                    timeout=max(0, deadline - time.monotonic())
+                )
+            except subprocess.TimeoutExpired as error:
+                stop_process_group(active_check)
+                # Do not wait for inherited pipe handles in escaped sessions.
+                # Such processes are deliberately outside our cleanup scope.
+                output = error.output or b""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                return False, output
+            return active_check.returncode == 0 and needle in output, output
+        finally:
+            active_check.stdout.close()
+            active_check = None
 
 else:
     usage(f"unknown mode: {mode}")

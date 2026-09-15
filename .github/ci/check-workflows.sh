@@ -70,6 +70,8 @@ bash .github/ci/check-workflows.test.sh
 .github/ci/cleanup.test.sh
 .github/ci/awake-guard.test.sh
 .github/ci/wait-for.test.sh
+bash .github/ci/with-timeout.test.sh
+bash .github/ci/qualification.test.sh
 .github/ci/prepare-testsuite.test.sh
 .github/ci/spec-corpus.test.sh
 

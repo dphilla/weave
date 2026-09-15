@@ -56,7 +56,7 @@ new_fixture() {
     chmod +x "$CASE_ROOT/$script"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'unset WEAVE_CI_ARTIFACT_DIR' > "$CASE_ROOT/.github/ci/qualification.sh"
-  for script in artifact-lifecycle cleanup awake-guard wait-for prepare-testsuite spec-corpus check-workflows; do
+  for script in artifact-lifecycle cleanup awake-guard wait-for with-timeout qualification prepare-testsuite spec-corpus check-workflows; do
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$CASE_ROOT/.github/ci/$script.test.sh"
     chmod +x "$CASE_ROOT/.github/ci/$script.test.sh"
   done

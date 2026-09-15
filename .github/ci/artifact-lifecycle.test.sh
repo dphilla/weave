@@ -3,6 +3,14 @@
 
 set -euo pipefail
 
+# The retention settings describe the caller's run, not these disposable test
+# cases. Never create fixture files in an inherited artifact directory.
+unset WEAVE_CI_ARTIFACT_DIR WEAVE_CI_KEEP_TEMP
+[[ $# == 0 || ( $# == 1 && "$1" == --environment-probe ) ]] || {
+  printf '%s\n' 'usage: artifact-lifecycle.test.sh [--environment-probe]' >&2
+  exit 2
+}
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LIFECYCLE="$ROOT/.github/ci/artifact-lifecycle.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/weave-artifact-lifecycle-test.XXXXXX")"
@@ -55,4 +63,22 @@ WEAVE_CI_ARTIFACT_DIR="$caller_path" run_case 0 true >/dev/null
 }
 
 rm -rf -- "$failure_path" "$kept_path"
+
+if [[ "${1:-}" != --environment-probe ]]; then
+  ambient_path="$TEST_ROOT/ambient artifacts"
+  mkdir -p "$ambient_path"
+  printf '%s\n' 'caller-owned marker' > "$ambient_path/keep.txt"
+  if ! WEAVE_CI_ARTIFACT_DIR="$ambient_path" WEAVE_CI_KEEP_TEMP=1 \
+    bash "$ROOT/.github/ci/artifact-lifecycle.test.sh" --environment-probe \
+      > "$TEST_ROOT/environment-probe.log" 2>&1; then
+    cat "$TEST_ROOT/environment-probe.log" >&2
+    printf '%s\n' 'artifact tests failed with inherited retention settings' >&2
+    exit 1
+  fi
+  [[ "$(find "$ambient_path" -mindepth 1 -maxdepth 1 -print)" == "$ambient_path/keep.txt" \
+    && "$(< "$ambient_path/keep.txt")" == 'caller-owned marker' ]] || {
+    printf '%s\n' 'artifact tests modified the inherited caller directory' >&2
+    exit 1
+  }
+fi
 printf '%s\n' 'PASS artifact lifecycle cleanup and retention'

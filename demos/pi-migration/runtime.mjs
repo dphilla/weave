@@ -150,6 +150,7 @@ export class TabRuntime {
     this.generation = 0;
     this.busy = false;
     this.lastProgressAt = 0;
+    this.lastPresenceAt = 0;
     this.boundary = null;
   }
 
@@ -205,7 +206,10 @@ export class TabRuntime {
 
   _log(message, level = "info") { this._emit({ type: "log", message, level }); }
 
-  _presence() { this._post({ type: "presence", peer: this._self() }); }
+  _presence() {
+    this.lastPresenceAt = Date.now();
+    this._post({ type: "presence", peer: this._self() });
+  }
 
   _setState(state, ownership = this.ownership) {
     this.state = state;
@@ -279,9 +283,14 @@ export class TabRuntime {
       }
       // A foreground dashboard probes all nodes. Reply from this message task
       // so idle background tabs are not marked lost merely because Chrome has
-      // throttled their own chained heartbeat timers. Node presence does not
-      // trigger another reply, and only the pinned controller can probe us.
+      // throttled their own chained heartbeat timers. Only the pinned
+      // controller can probe a node; node replies do not echo one another.
       if (type === "hello" || (this.role === "node" && peer.role === "controller" && sender === this.controllerId)) this._presence();
+      // Chrome can throttle the dashboard's interval as well as node timers.
+      // Live source presence arrives through message tasks; use it to keep a
+      // bounded controller probe cadence without treating silence as life.
+      // Stamp before posting so probe replies cannot create a heartbeat loop.
+      else if (this.role === "controller" && peer.role === "node" && Date.now() - this.lastPresenceAt >= 2000) this._presence();
       this._emit({ type: "state" });
       return;
     }

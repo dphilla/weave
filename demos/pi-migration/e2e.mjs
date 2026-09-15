@@ -233,6 +233,15 @@ async function click(client, selector, count = 1, foreground = true) {
   // A real foreground switch paints queued requestAnimationFrame UI updates.
   // CDP can otherwise dispatch the click before that first visible frame.
   await sleep(120);
+  // Runtime completion can precede its timer-driven DOM update, especially
+  // when Chrome delays a background page's render timer. Wait for the real
+  // control to become usable; never invoke a handler or click a disabled UI.
+  await waitFor(`enabled visible control ${selector}`, () => client.evaluate(`(() => {
+    const element = document.querySelector(${JSON.stringify(selector)});
+    if (!element || element.disabled) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  })()`), 5_000);
   await client.evaluate(`document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'center', behavior:'instant'})`);
   // Let Chrome's compositor settle the scroll before sending screen coordinates.
   await sleep(120);

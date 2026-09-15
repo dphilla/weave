@@ -1,5 +1,15 @@
 # Pi demo qualification
 
+## Comprehensive local sweep — 2026-09-14–15
+
+The [latest project-wide qualification](../../docs/LOCAL_QUALIFICATION.md)
+records the subsequent duplicate/Stop, destination-reload and hidden-controller
+heartbeat fixes, 509 passing JavaScript tests, the completed 370-second soak,
+full final-artifact browser replays, CI-harness fixes and independent consumer
+checks. It also records the still-unsuccessful ordinary-Chrome ICE connection
+separately from passing literal-ICE RTC and default local transport.
+The artifact hashes and counts below are historical, not the current build.
+
 ## Connection-readiness fixes — 2026-09-14
 
 This qualification addresses a reproduced demo scheduling bug, not the

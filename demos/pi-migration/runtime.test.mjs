@@ -1043,6 +1043,41 @@ test("pinned controller probes keep background idle nodes observable without hea
   } finally { await fixture.close(); }
 });
 
+test("real source presence maintains bounded probes when controller and node timers are deferred", integration, async () => {
+  const fixture = await room(2, { transport: "local", RTCPeerConnection: undefined });
+  try {
+    await fixture.controller.start("1");
+    await until(() => BigInt(fixture.nodes[0].progress.sequence) > 1n);
+    for (const runtime of [fixture.controller, ...fixture.nodes]) clearInterval(runtime.heartbeat);
+    const idle = fixture.controller.peers.get(fixture.nodes[1].instanceId);
+    idle.lastSeen = Date.now() - 20_000;
+    assert.equal(fixture.controller.getSnapshot().nodes.find((node) => node.nodeId === "2").online, false);
+    const sourceProgress = BigInt(fixture.nodes[0].progress.sequence);
+    const before = fixture.bus.messages.length;
+    const probes = () => fixture.bus.messages.slice(before).filter((message) => message.type === "presence" && message.sender === fixture.controller.instanceId);
+    // No manual controller probe: the real guest's host progress is the only
+    // independently scheduled source of presence after every timer is deferred.
+    await until(() => fixture.controller.getSnapshot().nodes.every((node) => node.online), 3500);
+    assert.ok(BigInt(fixture.nodes[0].progress.sequence) > sourceProgress);
+    assert.equal(fixture.nodes[0].ownership, "retained");
+    assert.equal(fixture.nodes[1].state, "idle");
+    assert.equal(fixture.nodes[1].instance, null);
+    assert.equal(probes().length, 1, "one bounded probe should restore the responsive idle peer without echoing");
+    await sleep(250);
+    assert.equal(probes().length, 1, "replies and repeated source progress must not cause a probe echo loop");
+    // A sent probe is not itself evidence of liveness. Only an actual peer
+    // response may refresh lastSeen or remove unknown ownership.
+    fixture.bus.drop = (message) => message.type === "presence" && message.sender === fixture.nodes[1].instanceId;
+    fixture.controller.peers.get(fixture.nodes[1].instanceId).lastSeen = Date.now() - 20_000;
+    await until(() => probes().length === 2, 3500);
+    await sleep(20);
+    const quiet = fixture.controller.getSnapshot().nodes.find((node) => node.nodeId === "2");
+    assert.equal(quiet.online, false);
+    assert.equal(quiet.ownership, "unknown");
+    assert.equal(fixture.events.filter((item) => item.type === "boundary" && item.kind === "start").length, 1);
+  } finally { await fixture.close(); }
+});
+
 test("replayed local migration commands return history and never execute the retired source again", integration, async () => {
   const fixture = await room(2, { transport: "local", RTCPeerConnection: undefined });
   try {

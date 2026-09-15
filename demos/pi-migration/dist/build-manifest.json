@@ -1,6 +1,6 @@
 {
-  "htmlSha256": "8f29c51db896c4410b70c83424c981187af406a4d55e14eb72e572514f91f872",
-  "htmlBytes": 355192,
+  "htmlSha256": "b0030edd31487260720e70ab8813b3132a22fc44ce91e9a9a10116c27c8c4909",
+  "htmlBytes": 355868,
   "sha256": "625677af70b6054a1eb2baac406b3b2f47cf2ce6a47ae3546d6367b6274f6234",
   "bytes": 2156,
   "sources": {
@@ -8,7 +8,7 @@
     "js/weave-browser.mjs": "8218837bb28828c18aef1a2a243a53b46b869aedb9afe0480697e5b039ccaf42",
     "packages/browser-transports/src/index.mjs": "b166dd341b861a9d68123b491a9f14e4ec694ec78ad67645463d0517914455d8",
     "packages/webrtc-session/src/index.mjs": "da815a50aa7ca6978abe3015a019e72c1f5d97d8fc9a8191c3ea7a811ee44f7a",
-    "demos/pi-migration/runtime.mjs": "09fd5d10900ed160e54ef188dfd10e436e4b028155fcb40967f621ce086b94de",
+    "demos/pi-migration/runtime.mjs": "7ec2a8fedb64367b3f4f14b5756ee0f24def579b98449dfbb22b60d93bfadb1e",
     "demos/pi-migration/rtc-diagnostics.mjs": "88e2ac4fd74c7d5c44b4d468116cda7c97efcf6e4275222a483b6b6432e2b623",
     "demos/pi-migration/tab-stream.mjs": "1c6b71937859444491e27fa5e004d58c2851a14c5119657668a39663589336c5",
     "demos/pi-migration/tab-indicator.mjs": "5060bd6a20a472bf53df1d49f67f3e2b2fa7ebf26980ade392fd5da9d97ba0ab",

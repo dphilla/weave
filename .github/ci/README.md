@@ -328,7 +328,11 @@ Caller-supplied artifact directories are always retained. With no directory,
 a successful local run removes its temporary directory, a failed run retains
 it, and `WEAVE_CI_KEEP_TEMP=1` retains either. Most central commands share
 this policy through `artifact-lifecycle.sh`; conformance keeps an integrated
-artifact/process trap because it also owns exact child PIDs. `--skip-build`
+artifact/process trap because it also owns exact child PIDs. The lifecycle
+self-tests clear inherited retention and artifact-directory overrides inside
+their disposable fixtures, so `WEAVE_CI_KEEP_TEMP=1` does not turn a cleanup
+assertion into a false failure or make a test use a caller's artifact directory.
+`--skip-build`
 requires the
 default release binaries to exist (or `WEAVE_BIN`, `WEAVE_WAZERO_BIN`, and
 `WEAVE_WAMR_BIN` to name them explicitly).

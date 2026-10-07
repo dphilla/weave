@@ -1,9 +1,6 @@
 package io.github.dphilla.weave.endive;
 
-/**
- * Migratable host-function state. {@link #restore} stages a fresh, non-executing target before
- * COMMIT and must not publish externally visible effects.
- */
+/** Migratable host state; restore stages a target before COMMIT without external effects. */
 public interface HostService {
     String name();
 

@@ -1,33 +1,26 @@
 package io.github.dphilla.weave.endive;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-/** The {@code weave.meta} custom section, byte-compatible with weave-core's {@code Meta}. */
+/** The weave.meta custom section, byte-compatible with weave-core's Meta. */
 public final class Meta {
-    public static final int VERSION = 1;
     private static final byte[] MAGIC = {'W', 'V', 'M', 'T'};
+    private static final byte[] WASM = {0, 'a', 's', 'm', 1, 0, 0, 0};
 
-    /** Value type codes used by meta, in weave-core order. */
+    /** Value types in weave-core code order. */
     public enum Type {
         I32,
         I64,
         F32,
         F64,
         V128,
-        FUNCREF;
-
-        static Type of(int code) {
-            Type[] all = values();
-            if (code < 0 || code >= all.length) {
-                throw new FormatException("unknown ValType code " + code);
-            }
-            return all[code];
-        }
+        FUNCREF
     }
 
-    /** An entry export or a host import: name plus signature. */
+    /** An entry export or a host import with its signature. */
     public static final class Func {
         public final String module;
         public final String name;
@@ -37,8 +30,8 @@ public final class Meta {
         Func(String module, String name, List<Type> params, List<Type> results) {
             this.module = module;
             this.name = name;
-            this.params = Collections.unmodifiableList(params);
-            this.results = Collections.unmodifiableList(results);
+            this.params = params;
+            this.results = results;
         }
     }
 
@@ -50,76 +43,50 @@ public final class Meta {
     public final long globalsAreaSize;
     public final long resultsAreaSize;
 
-    private Meta(
-            long pollPeriod,
-            List<Func> entries,
-            List<String> memories,
-            List<Func> imports,
-            List<String> controlGlobals,
-            long globalsAreaSize,
-            long resultsAreaSize) {
-        this.pollPeriod = pollPeriod;
-        this.entries = Collections.unmodifiableList(entries);
-        this.memories = Collections.unmodifiableList(memories);
-        this.imports = Collections.unmodifiableList(imports);
-        this.controlGlobals = Collections.unmodifiableList(controlGlobals);
-        this.globalsAreaSize = globalsAreaSize;
-        this.resultsAreaSize = resultsAreaSize;
+    private Meta(Bytes.Reader r) {
+        int version = r.u16();
+        if (version != 1) {
+            throw new FormatException("weave.meta: unsupported version " + version);
+        }
+        pollPeriod = r.u32();
+        entries = funcs(r, false);
+        memories = names(r);
+        imports = funcs(r, true);
+        controlGlobals = names(r);
+        globalsAreaSize = r.u32();
+        resultsAreaSize = r.u32();
+        r.end("weave.meta");
     }
 
     public static Meta decode(byte[] payload) {
-        if (payload.length < 4
-                || payload[0] != MAGIC[0]
-                || payload[1] != MAGIC[1]
-                || payload[2] != MAGIC[2]
-                || payload[3] != MAGIC[3]) {
+        if (payload.length < 4 || !Arrays.equals(payload, 0, 4, MAGIC, 0, 4)) {
             throw new FormatException("weave.meta: bad magic");
         }
-        Bytes.Reader r = new Bytes.Reader(payload, 4, payload.length);
-        int version = r.u16();
-        if (version != VERSION) {
-            throw new FormatException("weave.meta: unsupported version " + version);
-        }
-        long pollPeriod = r.u32();
-        List<Func> entries = new ArrayList<>();
-        for (int i = 0, n = r.u16(); i < n; i++) {
-            String name = r.str();
-            entries.add(new Func(null, name, types(r), types(r)));
-        }
-        List<String> memories = new ArrayList<>();
-        for (int i = 0, n = r.u16(); i < n; i++) {
-            memories.add(r.str());
-        }
-        List<Func> imports = new ArrayList<>();
-        for (int i = 0, n = r.u16(); i < n; i++) {
-            String module = r.str();
-            String name = r.str();
-            imports.add(new Func(module, name, types(r), types(r)));
-        }
-        List<String> controlGlobals = new ArrayList<>();
-        for (int i = 0, n = r.u16(); i < n; i++) {
-            controlGlobals.add(r.str());
-        }
-        long globalsAreaSize = r.u32();
-        long resultsAreaSize = r.u32();
-        r.expectEnd("weave.meta");
-        return new Meta(
-                pollPeriod,
-                entries,
-                memories,
-                imports,
-                controlGlobals,
-                globalsAreaSize,
-                resultsAreaSize);
+        return new Meta(new Bytes.Reader(payload, 4, payload.length));
     }
 
-    private static List<Type> types(Bytes.Reader r) {
-        int n = r.u16();
-        List<Type> out = new ArrayList<>(n);
-        for (int i = 0; i < n; i++) {
-            out.add(Type.of(r.u8()));
+    /** The raw weave.meta payload of a woven module, which must not have a start section. */
+    static byte[] section(byte[] wasm) {
+        if (wasm.length < 8 || !Arrays.equals(wasm, 0, 8, WASM, 0, 8)) {
+            throw new FormatException("not a wasm module");
         }
-        return out;
+        Bytes.Reader r = new Bytes.Reader(wasm, 8, wasm.length);
+        byte[] meta = null;
+        while (r.remaining() > 0) {
+            int id = r.u8();
+            Bytes.Reader section = r.slice(r.leb());
+            if (id == 8) {
+                throw new FormatException(
+                        "woven migration module must not contain a start section");
+            }
+            if (id == 0 && meta == null && section.text(section.leb()).equals("weave.meta")) {
+                meta = section.rest();
+            }
+        }
+        if (meta == null) {
+            throw new FormatException("module has no weave.meta section");
+        }
+        return meta;
     }
 
     public int entryIndex(String name) {
@@ -129,5 +96,34 @@ public final class Meta {
             }
         }
         return -1;
+    }
+
+    private static List<Func> funcs(Bytes.Reader r, boolean imports) {
+        List<Func> out = new ArrayList<>();
+        for (int i = 0, n = r.u16(); i < n; i++) {
+            String module = imports ? r.str() : null;
+            out.add(new Func(module, r.str(), types(r), types(r)));
+        }
+        return Collections.unmodifiableList(out);
+    }
+
+    private static List<String> names(Bytes.Reader r) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0, n = r.u16(); i < n; i++) {
+            out.add(r.str());
+        }
+        return Collections.unmodifiableList(out);
+    }
+
+    private static List<Type> types(Bytes.Reader r) {
+        List<Type> out = new ArrayList<>();
+        for (int i = 0, n = r.u16(); i < n; i++) {
+            int code = r.u8();
+            if (code >= Type.values().length) {
+                throw new FormatException("unknown value type " + code);
+            }
+            out.add(Type.values()[code]);
+        }
+        return Collections.unmodifiableList(out);
     }
 }

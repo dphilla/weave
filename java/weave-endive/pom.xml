@@ -6,16 +6,22 @@
 
   <groupId>io.github.dphilla.weave</groupId>
   <artifactId>weave-endive</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>0.1.0</version>
   <packaging>jar</packaging>
-  <name>Weave Endive adapter</name>
+  <name>Weave Endive node runner</name>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>11</maven.compiler.release>
     <endive.version>1.1.0</endive.version>
     <junit.version>5.14.4</junit.version>
-    <spike.package>io/github/dphilla/weave/endive/spike</spike.package>
   </properties>
 
   <dependencies>
@@ -30,6 +36,11 @@
       <version>${endive.version}</version>
     </dependency>
     <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>compiler</artifactId>
+      <version>${endive.version}</version>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <version>${junit.version}</version>
@@ -38,47 +49,69 @@
   </dependencies>
 
   <build>
-    <resources>
-      <!-- the exact woven bytes the build-time compiler consumed, for hashing and MODULE_DATA -->
-      <resource>
-        <directory>src/test/resources/golden</directory>
-        <targetPath>${spike.package}</targetPath>
-        <includes>
-          <include>counter.woven.wasm</include>
-        </includes>
-      </resource>
-    </resources>
+    <finalName>weave-endive</finalName>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <version>3.16.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+          </compilerArgs>
+        </configuration>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.6</version>
+      </plugin>
+      <plugin>
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <version>3.10.3</version>
         <configuration>
-          <argLine>-Xss8m</argLine>
+          <java>
+            <googleJavaFormat>
+              <version>1.35.0</version>
+              <style>AOSP</style>
+              <reflowLongStrings>true</reflowLongStrings>
+              <formatJavadoc>false</formatJavadoc>
+            </googleJavaFormat>
+            <importOrder/>
+            <removeUnusedImports/>
+            <forbidWildcardImports/>
+          </java>
         </configuration>
       </plugin>
       <plugin>
-        <groupId>run.endive</groupId>
-        <artifactId>endive-compiler-maven-plugin</artifactId>
-        <version>${endive.version}</version>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.5.1</version>
         <configuration>
-          <interpreterFallback>FAIL</interpreterFallback>
+          <archive>
+            <manifest>
+              <mainClass>io.github.dphilla.weave.endive.Main</mainClass>
+              <addClasspath>true</addClasspath>
+              <classpathPrefix>lib/</classpathPrefix>
+            </manifest>
+          </archive>
         </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.11.0</version>
         <executions>
           <execution>
-            <id>counter</id>
+            <id>copy-runtime-dependencies</id>
+            <phase>package</phase>
             <goals>
-              <goal>compile</goal>
+              <goal>copy-dependencies</goal>
             </goals>
             <configuration>
-              <wasmFile>${project.basedir}/src/test/resources/golden/counter.woven.wasm</wasmFile>
-              <name>io.github.dphilla.weave.endive.spike.CounterModule</name>
-              <moduleInterface>io.github.dphilla.weave.endive.spike.Counter</moduleInterface>
+              <includeScope>runtime</includeScope>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
             </configuration>
           </execution>
         </executions>

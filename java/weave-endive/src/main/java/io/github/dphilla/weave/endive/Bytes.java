@@ -2,37 +2,42 @@ package io.github.dphilla.weave.endive;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
-import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.Comparator;
 
-/** Little-endian codec helpers shared by the meta, snapshot and wire formats. */
+/** Little-endian codecs shared by the meta, snapshot and wire formats. */
 final class Bytes {
+    static final Comparator<String> UTF8_ORDER = (a, b) -> Arrays.compareUnsigned(utf8(a), utf8(b));
+
     private Bytes() {}
 
-    static final Comparator<String> UTF8_ORDER =
-            (a, b) -> {
-                byte[] x = a.getBytes(StandardCharsets.UTF_8);
-                byte[] y = b.getBytes(StandardCharsets.UTF_8);
-                int n = Math.min(x.length, y.length);
-                for (int i = 0; i < n; i++) {
-                    int c = Integer.compare(x[i] & 0xff, y[i] & 0xff);
-                    if (c != 0) {
-                        return c;
-                    }
-                }
-                return Integer.compare(x.length, y.length);
-            };
+    static byte[] utf8(String s) {
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    static String utf8(byte[] data, int off, int len) {
+        try {
+            return StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(data, off, len))
+                    .toString();
+        } catch (CharacterCodingException e) {
+            throw new FormatException("string is not valid UTF-8");
+        }
+    }
 
     static MessageDigest sha256() {
         try {
             return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is unavailable", e);
+            throw new IllegalStateException(e);
         }
     }
 
@@ -41,28 +46,14 @@ final class Bytes {
     }
 
     static String hex(byte[] data) {
-        StringBuilder sb = new StringBuilder(data.length * 2);
+        StringBuilder sb = new StringBuilder();
         for (byte b : data) {
-            sb.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+            sb.append(String.format("%02x", b & 0xff));
         }
         return sb.toString();
     }
 
-    static String utf8(byte[] data, int off, int len) {
-        try {
-            CharBuffer chars =
-                    StandardCharsets.UTF_8
-                            .newDecoder()
-                            .onMalformedInput(CodingErrorAction.REPORT)
-                            .onUnmappableCharacter(CodingErrorAction.REPORT)
-                            .decode(ByteBuffer.wrap(data, off, len));
-            return chars.toString();
-        } catch (CharacterCodingException e) {
-            throw new FormatException("string is not valid UTF-8");
-        }
-    }
-
-    /** Bounds-checked little-endian reader; every overrun is a {@link FormatException}. */
+    /** Bounds-checked reader; every overrun is a FormatException. */
     static final class Reader {
         private final byte[] buf;
         private final int end;
@@ -78,38 +69,28 @@ final class Bytes {
             this.end = end;
         }
 
-        int pos() {
-            return pos;
-        }
-
         int remaining() {
             return end - pos;
         }
 
-        private int need(long n, String what) {
+        private int take(long n) {
             if (n < 0 || n > end - pos) {
-                throw new FormatException("truncated " + what);
+                throw new FormatException("truncated input");
             }
-            int at = pos;
             pos += (int) n;
-            return at;
+            return pos - (int) n;
         }
 
         int u8() {
-            return buf[need(1, "u8")] & 0xff;
+            return buf[take(1)] & 0xff;
         }
 
         int u16() {
-            int at = need(2, "u16");
-            return (buf[at] & 0xff) | (buf[at + 1] & 0xff) << 8;
+            return u8() | u8() << 8;
         }
 
         int i32() {
-            int at = need(4, "u32");
-            return (buf[at] & 0xff)
-                    | (buf[at + 1] & 0xff) << 8
-                    | (buf[at + 2] & 0xff) << 16
-                    | (buf[at + 3] & 0xff) << 24;
+            return u16() | u16() << 16;
         }
 
         long u32() {
@@ -117,81 +98,87 @@ final class Bytes {
         }
 
         long u64() {
-            long lo = u32();
-            long hi = u32();
-            return lo | hi << 32;
+            return u32() | u32() << 32;
         }
 
-        byte[] bytes(long n, String what) {
-            int at = need(n, what);
-            byte[] out = new byte[(int) n];
-            System.arraycopy(buf, at, out, 0, (int) n);
-            return out;
+        long leb() {
+            long v = 0;
+            for (int shift = 0; shift < 35; shift += 7) {
+                int b = u8();
+                if (shift == 28 && (b & 0xf0) != 0) {
+                    break;
+                }
+                v |= (long) (b & 0x7f) << shift;
+                if ((b & 0x80) == 0) {
+                    return v;
+                }
+            }
+            throw new FormatException("invalid u32 LEB128");
         }
 
-        String str() {
-            long n = u32();
-            int at = need(n, "string");
+        byte[] bytes(long n) {
+            int at = take(n);
+            return Arrays.copyOfRange(buf, at, at + (int) n);
+        }
+
+        Reader slice(long n) {
+            int at = take(n);
+            return new Reader(buf, at, at + (int) n);
+        }
+
+        String text(long n) {
+            int at = take(n);
             return utf8(buf, at, (int) n);
         }
 
-        byte[] blob() {
-            return bytes(u32(), "bytes");
+        String str() {
+            return text(u32());
         }
 
-        void expectEnd(String what) {
+        byte[] blob() {
+            return bytes(u32());
+        }
+
+        byte[] rest() {
+            return bytes(remaining());
+        }
+
+        void end(String what) {
             if (pos != end) {
                 throw new FormatException(what + ": trailing bytes");
             }
         }
     }
 
-    /** Little-endian writer. */
-    static final class Writer {
-        private final ByteArrayOutputStream out = new ByteArrayOutputStream();
-
+    static final class Writer extends ByteArrayOutputStream {
         Writer u8(int v) {
-            out.write(v);
+            write(v);
             return this;
         }
 
         Writer u16(int v) {
-            out.write(v);
-            out.write(v >>> 8);
-            return this;
+            return u8(v).u8(v >>> 8);
         }
 
         Writer u32(long v) {
-            out.write((int) v);
-            out.write((int) (v >>> 8));
-            out.write((int) (v >>> 16));
-            out.write((int) (v >>> 24));
-            return this;
+            return u16((int) v).u16((int) (v >>> 16));
         }
 
         Writer u64(long v) {
-            u32(v);
-            return u32(v >>> 32);
+            return u32(v).u32(v >>> 32);
         }
 
         Writer raw(byte[] b) {
-            out.write(b, 0, b.length);
+            write(b, 0, b.length);
             return this;
         }
 
         Writer str(String s) {
-            byte[] b = s.getBytes(StandardCharsets.UTF_8);
-            u32(b.length);
-            return raw(b);
+            return blob(utf8(s));
         }
 
         Writer blob(byte[] b) {
-            u32(b.length);
-            return raw(b);
-        }
-
-        byte[] toByteArray() {
-            return out.toByteArray();
+            return u32(b.length).raw(b);
         }
     }
 }

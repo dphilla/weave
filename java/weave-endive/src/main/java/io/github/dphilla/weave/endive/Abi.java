@@ -77,7 +77,7 @@ final class Abi {
 
     // Only function imports are accepted, so imported functions come first and globals start at 0.
     private static void checkImports(WasmModule module, Meta meta) {
-        List<String> actual = new ArrayList<>();
+        List<List<Object>> actual = new ArrayList<>();
         boolean poll = false;
         for (int i = 0; i < module.importSection().importCount(); i++) {
             Import imp = module.importSection().getImport(i);
@@ -94,12 +94,14 @@ final class Abi {
                         "weave.poll must be imported once as [] -> [i32]");
                 poll = true;
             } else {
-                actual.add(name + type.params() + type.returns());
+                actual.add(List.<Object>of(name, type.params(), type.returns()));
             }
         }
-        List<String> expected = new ArrayList<>();
+        List<List<Object>> expected = new ArrayList<>();
         for (Meta.Func f : meta.imports) {
-            expected.add(f.module + "." + f.name + valTypes(f.params) + valTypes(f.results));
+            expected.add(
+                    List.<Object>of(
+                            f.module + "." + f.name, valTypes(f.params), valTypes(f.results)));
         }
         require(
                 actual.equals(expected),

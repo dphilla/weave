@@ -59,6 +59,7 @@
           <compilerArgs>
             <arg>-Xlint:all</arg>
           </compilerArgs>
+          <failOnWarning>true</failOnWarning>
         </configuration>
       </plugin>
       <plugin>

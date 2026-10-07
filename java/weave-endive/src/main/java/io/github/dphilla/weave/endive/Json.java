@@ -116,7 +116,8 @@ final class Json {
     private int hex4() {
         int v = 0;
         for (int i = 0; i < 4; i++) {
-            int d = Character.digit(next(), 16);
+            char c = next();
+            int d = c < 128 ? Character.digit(c, 16) : -1;
             if (d < 0) {
                 throw new FormatException("invalid unicode escape");
             }

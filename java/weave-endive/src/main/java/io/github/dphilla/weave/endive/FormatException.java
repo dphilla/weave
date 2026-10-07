@@ -1,10 +1,10 @@
 package io.github.dphilla.weave.endive;
 
 /** Malformed or unsupported Weave bytes: meta, snapshot, frame or module. */
-public final class FormatException extends RuntimeException {
+final class FormatException extends RuntimeException {
     private static final long serialVersionUID = 1L;
 
-    public FormatException(String message) {
+    FormatException(String message) {
         super(message);
     }
 }

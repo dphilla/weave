@@ -27,6 +27,7 @@ index at every runtime boundary:
 | 10 | Chrome → WAMR → Chrome → WAMR through WebSocket↔TCP relay | ✅ |
 | 11 | Chrome A → Chrome B → Chrome A directly over WebRTC DataChannels | ✅ |
 | 12 | Chrome → Wasmtime → Chrome through the generic WebRTC↔TCP sidecar | ✅ |
+| 13 | wasmtime → Endive (pure JVM) → Node.js, and Endive both ways with wasmtime, Node.js, wazero, and WAMR | ✅ |
 
 Run the native/Node/wazero matrix with `./scripts/e2e.sh`. Runnable, verified
 three-runtime server and direct browser-peer examples live in
@@ -101,6 +102,7 @@ js/weave.mjs             plugin for JS runtimes (browser-clean core: standard We
 js/weave-browser.mjs     Weave defaults and compatibility exports for browser transports
 js/weave-node.mjs        Node.js node runner (TCP transport + CLI)
 go/weave-wazero          wazero (pure-Go) node runner
+java/weave-endive        Endive (pure-JVM) node runner
 wamr/                    WAMR 2.4.4 adapter and symmetric node CLI
 demos/                   runnable server-chain, browser-P2P, and Chrome↔WAMR examples
 guests/                  test guests (WAT + Rust wasm32-unknown-unknown)
@@ -216,6 +218,11 @@ fast interpreter with pinned SIMDe support and checked build-local adaptations
 for indexed multiple-memory operations. It enables bulk memory, SIMD,
 reference types, and multiple memories, and currently supplies only the three
 `env.emit*` sample services.
+The Endive runner compiles each module to JVM bytecode with Endive's runtime
+compiler and never falls back to its interpreter. That compiler does not yet
+support SIMD (`v128`), so an Endive node refuses SIMD workloads before staging,
+leaving the source running, and does not advertise `simd`. It supplies the same
+three `env.emit*` services.
 Chrome cannot directly start an export with a public `v128` parameter or
 result; use a scalar guest wrapper. It can receive and resume a workload whose
 internal state uses SIMD.
@@ -254,9 +261,9 @@ internal state uses SIMD.
   protocol deliberately does not provide peer identity, workload
   authorization, rendezvous, TURN credential issuance, or connection pooling;
   the supervising application must own those policies before network exposure.
-- Incoming modules are capped at 512 MiB in Rust/JS (256 MiB in wazero), and
-  aggregate memory accepted at handoff is capped at 1 GiB by default. This is
-  not a lifetime cap on later guest `memory.grow` instructions.
+- Incoming modules are capped at 512 MiB in Rust/JS (256 MiB in wazero and
+  Endive), and aggregate memory accepted at handoff is capped at 1 GiB by
+  default. This is not a lifetime cap on later guest `memory.grow` instructions.
 - A target cache miss synchronizes and compiles the module before pre-copy.
   The current runners start that work at a guest poll point, so cold transfer
   time is additional downtime and can dominate for a large module. Distribute

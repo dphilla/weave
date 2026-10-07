@@ -20,7 +20,7 @@ import java.util.stream.Collectors;
 import run.endive.runtime.HostFunction;
 
 /** A symmetric Weave node, as weave-wazero's serve; the serving thread owns every Endive object. */
-public final class Node {
+final class Node {
     static final String RUNTIME = "endive";
 
     private static final class Request {
@@ -58,7 +58,7 @@ public final class Node {
     private SourceMigration migration;
     private ServerSocket server;
 
-    public Node(PrintStream out, PrintStream log, SourceMigration.Options opts) {
+    Node(PrintStream out, PrintStream log, SourceMigration.Options opts) {
         this.out = out;
         this.log = log;
         this.opts = opts;
@@ -75,7 +75,7 @@ public final class Node {
     }
 
     /** Binds before serving, so that port 0 resolves to the actual port. */
-    public int bind(String listen) throws IOException {
+    int bind(String listen) throws IOException {
         int colon = listen.lastIndexOf(':');
         String host = listen.substring(0, colon).replaceAll("^\\[(.*)]$", "$1");
         server = new ServerSocket();
@@ -89,7 +89,7 @@ public final class Node {
     }
 
     /** Runs the optional workload, then hosts incoming ones; exitOnDone returns after the first. */
-    public void serve(WovenModule module, String entry, long[] args, boolean exitOnDone)
+    void serve(WovenModule module, String entry, long[] args, boolean exitOnDone)
             throws InterruptedException {
         WovenInstance first = module == null ? null : instance(module, out, true);
         if (first != null) {

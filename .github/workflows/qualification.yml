@@ -30,6 +30,7 @@ jobs:
           rust: "true"
           node: "true"
           go: "true"
+          java: "true"
       - name: Fetch verified WAMR source
         run: |
           .github/ci/prepare-wamr.sh "$RUNNER_TEMP/wasm-micro-runtime" | tee "$RUNNER_TEMP/wamr.env"

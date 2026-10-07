@@ -1,6 +1,5 @@
 package io.github.dphilla.weave.endive;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -130,22 +129,21 @@ final class TargetSession {
         WovenModule module = cache.get(Bytes.hex(hash));
         if (module == null) {
             conn.send(Wire.MODULE_NEED, Wire.EMPTY);
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream(Math.min((int) size, 1 << 20));
-            while (bytes.size() < size) {
+            byte[] bytes = new byte[(int) size];
+            for (int got = 0; got < bytes.length; ) {
                 Wire.Frame f = conn.expect(Wire.MODULE_DATA, "MODULE_DATA");
                 int length = f.payload.length - 8;
-                if (length <= 0
-                        || f.reader().u64() != bytes.size()
-                        || length > size - bytes.size()) {
+                if (length <= 0 || f.reader().u64() != got || length > bytes.length - got) {
                     throw reject(2, "invalid module chunk");
                 }
-                bytes.write(f.payload, 8, length);
+                System.arraycopy(f.payload, 8, bytes, got, length);
+                got += length;
             }
-            if (!MessageDigest.isEqual(Bytes.sha256(bytes.toByteArray()), hash)) {
+            if (!MessageDigest.isEqual(Bytes.sha256(bytes), hash)) {
                 throw reject(2, "module hash mismatch");
             }
             try {
-                module = WovenModule.compile(bytes.toByteArray());
+                module = WovenModule.compile(bytes);
             } catch (RuntimeException e) {
                 throw reject(3, "instantiation failed: " + e.getMessage());
             }

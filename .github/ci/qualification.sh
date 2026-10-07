@@ -23,6 +23,7 @@ unset WEAVE_CI_ARTIFACT_DIR
 .github/ci/run-unit.sh rust
 WEAVE_PI_REQUIRE_CLI=1 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
+.github/ci/run-unit.sh java
 .github/ci/run-wamr.sh
 .github/ci/check-workflows.sh
 

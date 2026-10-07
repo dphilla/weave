@@ -27,6 +27,10 @@ final class Golden {
         }
     }
 
+    static byte[] utf8(String s) {
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
     static List<String> lines(String name) {
         return events(new String(bytes(name), StandardCharsets.UTF_8));
     }

@@ -26,3 +26,4 @@ WEAVE_LIFECYCLE_FIXTURE="$FIXTURE_DIR/lifecycle.woven.wasm" \
   cd go/weave-wazero
   go test -mod=readonly -count=1 ./...
 )
+mvn -B --no-transfer-progress -f java/weave-endive/pom.xml test

@@ -124,8 +124,8 @@ indices in linear memory. Therefore:
 The host-side guest ABI never exceeds: read/write exported memory, get/set
 exported i32 globals, and call exports. A runtime also has to supply the
 module's declared imports and transport. This small surface is why the same
-state model works in wasmtime, V8/Chrome, wazero, and WAMR without engine
-stack APIs.
+state model works in wasmtime, V8/Chrome, wazero, WAMR, and Endive (JVM)
+without engine stack APIs.
 
 ### 1.5 Funcrefs, tables, segments
 
@@ -201,8 +201,8 @@ the workload keeps running through the bulk of the memory transfer).
   still using bounded host memory.
 - **Verification.** The target recomputes SHA-256 over the complete final
   state (all memories + control globals + service blobs) and must match the
-  source's `FINAL_END` hash before it acknowledges. Three independent
-  implementations (Rust, JS, Go) of the hash stream agree byte-for-byte —
+  source's `FINAL_END` hash before it acknowledges. Four independent
+  implementations (Rust, JS, Go, Java) of the hash stream agree byte-for-byte —
   this is checked implicitly by every cross-runtime migration.
 - **Prepare/commit ownership.** Until `PREPARED`, the source still holds a
   complete checkpoint and any error rewinds locally (covered by an explicit

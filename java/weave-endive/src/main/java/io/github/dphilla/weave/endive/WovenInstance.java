@@ -1,6 +1,8 @@
 package io.github.dphilla.weave.endive;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -20,9 +22,9 @@ import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.ValType;
 
 /** One Endive instance of a woven module with the guest ABI lifecycle enforced; thread-confined. */
-public final class WovenInstance implements PageTracker.Memories {
+final class WovenInstance implements PageTracker.Memories {
     /** The guest trapped or failed; the instance must be discarded. */
-    public static final class Trap extends RuntimeException {
+    static final class Trap extends RuntimeException {
         private static final long serialVersionUID = 1L;
 
         Trap(String message, Throwable cause) {
@@ -109,7 +111,7 @@ public final class WovenInstance implements PageTracker.Memories {
     }
 
     /** A fresh workload: runs __weave_init with polls answered by zero. */
-    public static WovenInstance fresh(
+    static WovenInstance fresh(
             WovenModule module, List<HostService> services, List<HostFunction> imports) {
         WovenInstance w = new WovenInstance(module, services, imports);
         w.initializing = true;
@@ -125,7 +127,7 @@ public final class WovenInstance implements PageTracker.Memories {
     }
 
     /** A restore or migration target, never initialized and with memories cleared for sparse pages. */
-    public static WovenInstance restoreTarget(
+    static WovenInstance restoreTarget(
             WovenModule module, List<HostService> services, List<HostFunction> imports) {
         WovenInstance w = new WovenInstance(module, services, imports);
         for (Memory m : w.memories) {
@@ -135,16 +137,16 @@ public final class WovenInstance implements PageTracker.Memories {
         return w;
     }
 
-    public WovenModule module() {
+    WovenModule module() {
         return module;
     }
 
-    public void onPoll(IntSupplier poll) {
+    void onPoll(IntSupplier poll) {
         this.poll = poll;
     }
 
     /** Runs an entry with raw arguments; true means the guest unwound. */
-    public boolean call(String name, long... args) {
+    boolean call(String name, long... args) {
         require(State.READY, State.COMPLETED);
         int index = meta.entryIndex(name);
         if (index < 0 || meta.entries.get(index).params.size() != args.length) {
@@ -155,7 +157,7 @@ public final class WovenInstance implements PageTracker.Memories {
         return execute(() -> f.apply(args));
     }
 
-    public boolean resume() {
+    boolean resume() {
         require(State.PAUSED);
         ExportFunction f = instance.exports().function("__weave_resume");
         return execute(() -> f.apply());
@@ -179,7 +181,7 @@ public final class WovenInstance implements PageTracker.Memories {
     }
 
     /** The completed entry's results from the results area, rendered like the Rust CLI. */
-    public List<String> results() {
+    List<String> results() {
         require(State.COMPLETED);
         int index = control(ENTRY);
         if (index < 0 || index >= meta.entries.size()) {
@@ -199,10 +201,10 @@ public final class WovenInstance implements PageTracker.Memories {
                 out.add(Long.toString(r.u64()));
             } else if (type == Meta.Type.F32) {
                 float v = Float.intBitsToFloat(r.i32());
-                out.add(display(v, Float.toString(v)));
+                out.add(display(v, true));
             } else if (type == Meta.Type.F64) {
                 double v = Double.longBitsToDouble(r.u64());
-                out.add(display(v, Double.toString(v)));
+                out.add(display(v, false));
             } else {
                 throw new FormatException("cannot render a " + type + " result");
             }
@@ -210,8 +212,8 @@ public final class WovenInstance implements PageTracker.Memories {
         return out;
     }
 
-    // Rust's Display: shortest round-trip digits, never an exponent.
-    private static String display(double v, String shortest) {
+    // Rust's Display: the shortest digits that round-trip, the nearer on a tie upward, no exponent.
+    static String display(double v, boolean f32) {
         if (Double.isNaN(v)) {
             return "NaN";
         }
@@ -221,10 +223,25 @@ public final class WovenInstance implements PageTracker.Memories {
         if (v == 0) {
             return 1 / v < 0 ? "-0" : "0";
         }
-        return new BigDecimal(shortest).stripTrailingZeros().toPlainString();
+        BigDecimal exact = new BigDecimal(v);
+        for (int digits = 1; ; digits++) {
+            BigDecimal down = exact.round(new MathContext(digits, RoundingMode.DOWN));
+            BigDecimal up = exact.round(new MathContext(digits, RoundingMode.UP));
+            boolean downOk = f32 ? down.floatValue() == (float) v : down.doubleValue() == v;
+            boolean upOk = f32 ? up.floatValue() == (float) v : up.doubleValue() == v;
+            if (upOk
+                    && (!downOk
+                            || up.subtract(exact).abs().compareTo(exact.subtract(down).abs())
+                                    <= 0)) {
+                return up.stripTrailingZeros().toPlainString();
+            }
+            if (downOk) {
+                return down.stripTrailingZeros().toPlainString();
+            }
+        }
     }
 
-    public Snapshot checkpoint() {
+    Snapshot checkpoint() {
         require(State.PAUSED);
         List<byte[]> mems = new ArrayList<>();
         for (int m = 0; m < memories.length; m++) {
@@ -234,7 +251,7 @@ public final class WovenInstance implements PageTracker.Memories {
     }
 
     /** Applies a complete checkpoint to a restore target, which becomes resumable. */
-    public void restore(Snapshot snap) {
+    void restore(Snapshot snap) {
         require(State.RESTORE_TARGET);
         if (!MessageDigest.isEqual(snap.moduleHash, module.sha256())
                 || snap.memories.size() != memories.length) {
@@ -332,7 +349,7 @@ public final class WovenInstance implements PageTracker.Memories {
         return memories[m].readBytes(offset, length);
     }
 
-    public List<Map.Entry<String, Integer>> controlGlobals() {
+    List<Map.Entry<String, Integer>> controlGlobals() {
         List<Map.Entry<String, Integer>> out = new ArrayList<>();
         for (int i = 0; i < controls.length; i++) {
             out.add(Map.entry(meta.controlGlobals.get(i), control(i)));
@@ -340,7 +357,7 @@ public final class WovenInstance implements PageTracker.Memories {
         return out;
     }
 
-    public List<Map.Entry<String, byte[]>> serviceBlobs() {
+    List<Map.Entry<String, byte[]>> serviceBlobs() {
         List<Map.Entry<String, byte[]>> out = new ArrayList<>();
         for (HostService s : services) {
             out.add(Map.entry(s.name(), s.snapshot()));
@@ -375,7 +392,7 @@ public final class WovenInstance implements PageTracker.Memories {
         retired.set(true);
     }
 
-    public boolean retired() {
+    boolean retired() {
         return retired.get();
     }
 

@@ -109,10 +109,11 @@ assert_exists "$TEST_TEMP/weave-unrelated.abc123"
 assert_exists "$TEST_TEMP/container/weave-conformance.nested"
 assert_exists "$TEST_TEMP/weave-conformance.regular-file"
 
-# --builds removes only the two exact cache trees, leaving other source and
+# --builds removes only the three exact cache trees, leaving other source and
 # nested tracked-looking files untouched.
 reset_fixture
 mkdir -p "$TEST_ROOT/target/cache" "$TEST_ROOT/wamr/target/cache" \
+  "$TEST_ROOT/java/weave-endive/target/lib" "$TEST_ROOT/java/weave-endive/src" \
   "$TEST_ROOT/guests/mandel/target" "$TEST_ROOT/go/weave-wazero"
 printf 'tracked\n' > "$TEST_ROOT/guests/mandel/target/CACHEDIR.TAG"
 printf 'tracked binary\n' > "$TEST_ROOT/go/weave-wazero/weave-wazero"
@@ -120,6 +121,8 @@ printf 'source\n' > "$TEST_ROOT/README.md"
 run_cleanup --builds >/dev/null
 assert_absent "$TEST_ROOT/target"
 assert_absent "$TEST_ROOT/wamr/target"
+assert_absent "$TEST_ROOT/java/weave-endive/target"
+assert_exists "$TEST_ROOT/java/weave-endive/src"
 assert_exists "$TEST_ROOT/guests/mandel/target/CACHEDIR.TAG"
 assert_exists "$TEST_ROOT/go/weave-wazero/weave-wazero"
 assert_exists "$TEST_ROOT/README.md"

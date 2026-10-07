@@ -7,7 +7,7 @@ import run.endive.wasm.types.FunctionType;
 import run.endive.wasm.types.ValType;
 
 /** The built-in env.emit* services; the blob is count u64 LE then sum i64 LE, as in every runner. */
-public final class EmitService implements HostService {
+final class EmitService implements HostService {
     private final String name;
     private final Consumer<String> log;
     private long count;
@@ -18,14 +18,14 @@ public final class EmitService implements HostService {
         this.log = log;
     }
 
-    public static List<EmitService> builtins(Consumer<String> log) {
+    static List<EmitService> builtins(Consumer<String> log) {
         return List.of(
                 new EmitService("env.emit", log),
                 new EmitService("env.emit32", log),
                 new EmitService("env.emit64", log));
     }
 
-    public HostFunction hostFunction() {
+    HostFunction hostFunction() {
         switch (name) {
             case "env.emit":
                 return function(

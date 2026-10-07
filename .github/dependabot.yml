@@ -19,3 +19,13 @@ updates:
       interval: monthly
     labels:
       - dependencies
+  - package-ecosystem: maven
+    directory: /java/weave-endive
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies
+    ignore:
+      # JUnit 6 needs Java 17; the adapter keeps Endive's Java 11 baseline.
+      - dependency-name: org.junit.jupiter:junit-jupiter
+        update-types: ["version-update:semver-major"]

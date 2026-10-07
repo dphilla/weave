@@ -7,16 +7,16 @@ import java.util.List;
 import java.util.Map;
 
 /** The portable WVSN snapshot, byte-compatible with weave-core's Snapshot. */
-public final class Snapshot {
-    public static final int WASM_PAGE = 65536;
+final class Snapshot {
+    static final int WASM_PAGE = 65536;
     private static final byte[] MAGIC = {'W', 'V', 'S', 'N'};
 
-    public final byte[] moduleHash;
-    public final List<byte[]> memories;
-    public final List<Map.Entry<String, Integer>> globals;
-    public final List<Map.Entry<String, byte[]>> services;
+    final byte[] moduleHash;
+    final List<byte[]> memories;
+    final List<Map.Entry<String, Integer>> globals;
+    final List<Map.Entry<String, byte[]>> services;
 
-    public Snapshot(
+    Snapshot(
             byte[] moduleHash,
             List<byte[]> memories,
             List<Map.Entry<String, Integer>> globals,
@@ -27,7 +27,7 @@ public final class Snapshot {
         this.services = List.copyOf(services);
     }
 
-    public byte[] stateHash() {
+    byte[] stateHash() {
         StateHasher h = new StateHasher(memories.size());
         for (byte[] m : memories) {
             h.memory(m.length).update(m);
@@ -35,7 +35,7 @@ public final class Snapshot {
         return h.finish(globals, services);
     }
 
-    public byte[] encode() {
+    byte[] encode() {
         Bytes.Writer w = new Bytes.Writer().raw(MAGIC).u16(1).raw(moduleHash);
         w.u32(memories.size());
         for (byte[] m : memories) {
@@ -52,7 +52,7 @@ public final class Snapshot {
         return w.raw(stateHash()).toByteArray();
     }
 
-    public static Snapshot decode(byte[] buf) {
+    static Snapshot decode(byte[] buf) {
         if (buf.length < 6 || !Arrays.equals(buf, 0, 4, MAGIC, 0, 4)) {
             throw new FormatException("snapshot: bad magic");
         }

@@ -97,6 +97,7 @@ final class Control {
         boolean typed =
                 FIELDS.containsAll(req.keySet())
                         && version instanceof Json.Num
+                        && action instanceof String
                         && List.of("status", "migrate", "operation").contains(action)
                         && optionalStrings(req);
         if (!typed || !isU32(((Json.Num) version).token)) {

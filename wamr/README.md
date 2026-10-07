@@ -3,7 +3,8 @@
 `weave-wamr` is a symmetric Weave node backed by the WebAssembly Micro
 Runtime (WAMR). It can start a pre-woven workload, receive one over the Weave
 v2 wire protocol, migrate the running workload onward, and answer the same
-`migrate`/`status` control commands as the Wasmtime, Node, and wazero runners.
+`migrate`/`status` control commands as the Wasmtime, Node, wazero, and Endive
+runners.
 
 The adapter is deliberately thin: Rust's existing `weave-core` owns metadata,
 framing, hashes, and values, while `weave-host` owns dirty-page pre-copy and

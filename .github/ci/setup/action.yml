@@ -13,6 +13,10 @@ inputs:
     description: Install the pinned Go toolchain
     required: false
     default: "false"
+  java:
+    description: Install the pinned JDK and checksum-verified Maven
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -26,6 +30,8 @@ runs:
           echo "rust=$RUST_VERSION"
           echo "node=$NODE_VERSION"
           echo "go=$GO_VERSION"
+          echo "java_distribution=$JAVA_DISTRIBUTION"
+          echo "java=$JAVA_VERSION"
         } >> "$GITHUB_OUTPUT"
 
     - name: Install Rust
@@ -73,3 +79,20 @@ runs:
         cache-dependency-path: |
           go/weave-wazero/go.sum
           sidecars/webrtc/go.sum
+
+    - name: Install Java
+      if: inputs.java == 'true'
+      uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      with:
+        distribution: ${{ steps.versions.outputs.java_distribution }}
+        java-version: ${{ steps.versions.outputs.java }}
+        cache: maven
+        cache-dependency-path: java/weave-endive/pom.xml
+
+    - name: Install Maven
+      if: inputs.java == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        .github/ci/prepare-maven.sh "$RUNNER_TEMP/weave-ci/maven" | tee "$RUNNER_TEMP/maven.env"
+        sed -n 's/^MAVEN_BIN_DIR=//p' "$RUNNER_TEMP/maven.env" >> "$GITHUB_PATH"

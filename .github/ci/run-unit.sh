@@ -10,13 +10,14 @@ NODE_BIN="${NODE_BIN:-node}"
 
 usage() {
   cat <<'EOF'
-usage: .github/ci/run-unit.sh rust|rust-quality|js|go|all
+usage: .github/ci/run-unit.sh rust|rust-quality|js|go|java|all
 
   rust          build and test the root Rust workspace
   rust-quality  require root/WAMR rustfmt and warning-free root Clippy
   js            run JavaScript tests, clean package installs, and strict type consumers
   go            format-check, vet, test, and build both Go modules
-  all           run rust-quality, rust, js, and go sequentially
+  java          format-check, build warning-free, and test the Endive adapter
+  all           run rust-quality, rust, js, go, and java sequentially
 EOF
 }
 
@@ -74,16 +75,22 @@ run_go() {
   )
 }
 
+run_java() {
+  mvn -B --no-transfer-progress -f java/weave-endive/pom.xml spotless:check verify
+}
+
 case "${1:-}" in
   rust) run_rust ;;
   rust-quality) run_rust_quality ;;
   js) run_js ;;
   go) run_go ;;
+  java) run_java ;;
   all)
     run_rust_quality
     run_rust
     WEAVE_PI_REQUIRE_CLI=1 run_js
     run_go
+    run_java
     ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;

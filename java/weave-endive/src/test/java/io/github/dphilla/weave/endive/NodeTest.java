@@ -9,6 +9,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
@@ -107,7 +108,7 @@ class NodeTest {
         assertTrue(message(reply).startsWith("migrated: "), message(reply));
         source.join();
         target.join();
-        List<String> combined = new java.util.ArrayList<>(source.sink.events());
+        List<String> combined = new ArrayList<>(source.sink.events());
         combined.addAll(target.sink.events());
         assertEquals(golden, combined);
         assertTrue(target.sink.events().size() > 1, "the target ran part of the workload");
@@ -148,7 +149,7 @@ class NodeTest {
         assertTrue(lookup.contains("\"state\":\"succeeded\",\"code\":\"MIGRATED\""), lookup);
         assertTrue(lookup.contains("\"lifecycle\":\"retired\",\"ownership\":\"retired\""), lookup);
         target.join();
-        List<String> combined = new java.util.ArrayList<>(source.sink.events());
+        List<String> combined = new ArrayList<>(source.sink.events());
         combined.addAll(target.sink.events());
         assertEquals(golden, combined);
     }
@@ -247,12 +248,38 @@ class NodeTest {
             assertEquals(3, r.u32());
             assertTrue(r.str().startsWith("instantiation failed"));
         }
-        Thread.sleep(200);
-        String status =
-                new String(
-                        target.node.control(bytes("{\"schema_version\":1,\"action\":\"status\"}")),
-                        StandardCharsets.UTF_8);
-        assertTrue(status.contains("\"lifecycle\":\"idle\""), status);
+        awaitIdle(target.node);
+    }
+
+    @Test
+    void serviceSetMismatchIsRejectedBeforeAnyRestore() throws Exception {
+        Running target = new Running(null);
+        byte[] woven = Golden.bytes("counter.woven.wasm");
+        try (Conn conn = Conn.dial(target.address(), Conn.IO_TIMEOUT_MS)) {
+            conn.send(Wire.HELLO, Wire.hello(Wire.ROLE_SOURCE, "test"));
+            conn.expect(Wire.HELLO, "HELLO");
+            conn.send(
+                    Wire.MODULE_META,
+                    new Bytes.Writer()
+                            .raw(Bytes.sha256(woven))
+                            .u64(woven.length)
+                            .blob(Meta.section(woven))
+                            .toByteArray());
+            conn.expect(Wire.MODULE_NEED, "MODULE_NEED");
+            conn.send(Wire.MODULE_DATA, new Bytes.Writer().u64(0).raw(woven).toByteArray());
+            conn.expect(Wire.MODULE_OK, "MODULE_OK");
+            conn.send(Wire.FINAL_BEGIN, Wire.EMPTY);
+            Bytes.Writer globals = new Bytes.Writer().u16(Abi.FIXED.size());
+            Abi.FIXED.forEach(name -> globals.str(name).u32(1));
+            conn.send(Wire.GLOBALS, globals.toByteArray());
+            Bytes.Writer services = new Bytes.Writer().u16(1);
+            services.str("env.unknown").blob(new byte[16]);
+            conn.send(Wire.SERVICES, services.toByteArray());
+            Wire.Frame f = conn.read();
+            assertEquals(Wire.ABORT, f.type);
+            assertEquals(5, f.reader().u32());
+        }
+        awaitIdle(target.node);
     }
 
     @Test
@@ -279,14 +306,23 @@ class NodeTest {
         assertTrue(
                 control(node, "{\"schema_version\":1,\"action\":\"status\",\"target\":null}")
                         .contains("STATUS_OK"));
+        assertTrue(control(node, "{\"schema_version\":1}").contains("INVALID_REQUEST"));
+        assertTrue(
+                control(node, "{\"schema_version\":1,\"action\":null}")
+                        .contains("INVALID_REQUEST"));
+    }
+
+    private static void awaitIdle(Node node) throws InterruptedException {
+        long deadline = System.nanoTime() + 10_000_000_000L;
+        while (!control(node, "{\"schema_version\":1,\"action\":\"status\"}")
+                .contains("\"lifecycle\":\"idle\"")) {
+            assertTrue(System.nanoTime() < deadline, "the node did not return to idle");
+            Thread.sleep(10);
+        }
     }
 
     private static String control(Node node, String json) {
-        return new String(node.control(bytes(json)), StandardCharsets.UTF_8);
-    }
-
-    private static byte[] bytes(String s) {
-        return s.getBytes(StandardCharsets.UTF_8);
+        return new String(node.control(Golden.utf8(json)), StandardCharsets.UTF_8);
     }
 
     /** A scripted protocol-v2 target that fails at a chosen point. */

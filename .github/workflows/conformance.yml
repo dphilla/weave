@@ -34,6 +34,7 @@ jobs:
           rust: "true"
           node: "true"
           go: "true"
+          java: "true"
       - run: .github/ci/run-unit.sh all
       - run: .github/ci/check-workflows.sh
 
@@ -135,6 +136,41 @@ jobs:
         with:
           name: main-wamr-${{ github.run_attempt }}
           path: ${{ runner.temp }}/weave-ci/wamr
+          if-no-files-found: warn
+          retention-days: 30
+
+  endive:
+    name: Endive directed pairs and guest semantics
+    needs: language-gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/ci/setup
+        with:
+          rust: "true"
+          node: "true"
+          go: "true"
+          java: "true"
+      - name: Fetch verified WAMR source
+        run: |
+          .github/ci/prepare-wamr.sh "$RUNNER_TEMP/wasm-micro-runtime" | tee "$RUNNER_TEMP/wamr.env"
+          grep '^WAMR_ROOT=' "$RUNNER_TEMP/wamr.env" >> "$GITHUB_ENV"
+      - name: Run all nine Endive directions and a route through Endive
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/endive
+        run: .github/ci/conformance.sh --suite endive
+      - name: Check Endive guest semantics and the asserted SIMD gap
+        env:
+          WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/endive/semantics
+        run: .github/ci/semantic-conformance.sh endive --skip-build
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-endive-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/weave-ci/endive
           if-no-files-found: warn
           retention-days: 30
 

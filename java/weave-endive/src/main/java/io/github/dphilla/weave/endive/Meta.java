@@ -6,12 +6,12 @@ import java.util.Collections;
 import java.util.List;
 
 /** The weave.meta custom section, byte-compatible with weave-core's Meta. */
-public final class Meta {
+final class Meta {
     private static final byte[] MAGIC = {'W', 'V', 'M', 'T'};
     private static final byte[] WASM = {0, 'a', 's', 'm', 1, 0, 0, 0};
 
     /** Value types in weave-core code order. */
-    public enum Type {
+    enum Type {
         I32,
         I64,
         F32,
@@ -21,11 +21,11 @@ public final class Meta {
     }
 
     /** An entry export or a host import with its signature. */
-    public static final class Func {
-        public final String module;
-        public final String name;
-        public final List<Type> params;
-        public final List<Type> results;
+    static final class Func {
+        final String module;
+        final String name;
+        final List<Type> params;
+        final List<Type> results;
 
         Func(String module, String name, List<Type> params, List<Type> results) {
             this.module = module;
@@ -35,13 +35,13 @@ public final class Meta {
         }
     }
 
-    public final long pollPeriod;
-    public final List<Func> entries;
-    public final List<String> memories;
-    public final List<Func> imports;
-    public final List<String> controlGlobals;
-    public final long globalsAreaSize;
-    public final long resultsAreaSize;
+    final long pollPeriod;
+    final List<Func> entries;
+    final List<String> memories;
+    final List<Func> imports;
+    final List<String> controlGlobals;
+    final long globalsAreaSize;
+    final long resultsAreaSize;
 
     private Meta(Bytes.Reader r) {
         int version = r.u16();
@@ -58,7 +58,7 @@ public final class Meta {
         r.end("weave.meta");
     }
 
-    public static Meta decode(byte[] payload) {
+    static Meta decode(byte[] payload) {
         if (payload.length < 4 || !Arrays.equals(payload, 0, 4, MAGIC, 0, 4)) {
             throw new FormatException("weave.meta: bad magic");
         }
@@ -89,7 +89,7 @@ public final class Meta {
         return meta;
     }
 
-    public int entryIndex(String name) {
+    int entryIndex(String name) {
         for (int i = 0; i < entries.size(); i++) {
             if (entries.get(i).name.equals(name)) {
                 return i;

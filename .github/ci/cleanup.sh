@@ -22,7 +22,8 @@ Options:
   --dry-run  print the exact paths that would be removed
   --temp     also remove owned, direct children of TMPDIR whose names match
              the exact temporary-directory prefixes used by Weave harnesses
-  --builds   also remove this checkout's target and wamr/target build trees
+  --builds   also remove this checkout's target, wamr/target, and
+             java/weave-endive/target build trees
   --all      equivalent to --temp --builds
   -h, --help show this help
 
@@ -260,6 +261,7 @@ fi
 if ((include_builds)); then
   remove_validated 'build cache' "$ROOT/target" "$ROOT" 0 directory
   remove_validated 'build cache' "$ROOT/wamr/target" "$ROOT" 0 directory
+  remove_validated 'build cache' "$ROOT/java/weave-endive/target" "$ROOT" 0 directory
 fi
 
 if ((action_count == 0)); then

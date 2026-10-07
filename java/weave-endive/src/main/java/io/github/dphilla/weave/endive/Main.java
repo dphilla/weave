@@ -194,7 +194,8 @@ public final class Main {
     }
 
     private int control(boolean migrate) throws IOException {
-        try (Conn conn = Conn.dial(required("node"), Conn.IO_TIMEOUT_MS)) {
+        // A node answers a legacy migrate only when it finishes, after up to 120 s.
+        try (Conn conn = Conn.dial(required("node"), migrate ? 130_000 : Conn.IO_TIMEOUT_MS)) {
             if (migrate) {
                 conn.send(Wire.CTL_MIGRATE, Wire.str(required("to")));
             } else {

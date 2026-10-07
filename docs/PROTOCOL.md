@@ -93,19 +93,20 @@ per service (UTF-8-byte order): u32 LE name length, name bytes,
                                 u64 LE blob length, blob bytes
 ```
 
-Implemented independently in Rust (`weave-core`), JS (`weave.mjs`) and Go
-(`weave-wazero`). Wasmtime and WAMR share the Rust protocol implementation;
+Implemented independently in Rust (`weave-core`), JS (`weave.mjs`), Go
+(`weave-wazero`), and Java (`weave-endive`). Wasmtime and WAMR share the Rust
+protocol implementation;
 every cross-runtime migration is an implicit conformance test.
 
 ## Node roles
 
-A *node* (`weave serve`, `weave-node.mjs serve`, `weave-wazero serve`, or
-`weave-wamr serve`) is symmetric: it runs at most one workload, accepts CTL
-commands, migrates out on CTL_MIGRATE (the poll loop picks the request up while
-the workload runs), and accepts incoming migrations when idle (busy nodes
-ABORT(9) new offers). Chains (A→B→C…) fall out of the symmetry. A browser tab
-has the same source/target behavior but exposes it through the demo UI rather
-than the raw-TCP control API.
+A *node* (`weave serve`, `weave-node.mjs serve`, `weave-wazero serve`,
+`weave-wamr serve`, or `weave-endive serve`) is symmetric: it runs at most one
+workload, accepts CTL commands, migrates out on CTL_MIGRATE (the poll loop
+picks the request up while the workload runs), and accepts incoming migrations
+when idle (busy nodes ABORT(9) new offers). Chains (A→B→C…) fall out of the
+symmetry. A browser tab has the same source/target behavior but exposes it
+through the demo UI rather than the raw-TCP control API.
 
 Service restore runs only on newly created, non-executing target service
 objects. A `HostService` restore implementation must stage internal state

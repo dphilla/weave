@@ -25,8 +25,8 @@ mvn -f java/weave-endive/pom.xml package
 
 This runs the tests and writes `target/weave-endive.jar` with its dependencies
 in `target/lib`. `java/weave-endive/weave-endive` is the launcher used below and
-by the CI harnesses. The only dependencies are Endive's `runtime`, `wasm`, and
-`compiler` artifacts (plus JUnit for tests).
+by the CI harnesses. The dependencies are Endive's `runtime`, `wasm`, and
+`compiler` artifacts and Jackson for control JSON (plus JUnit for tests).
 
 Each module is compiled to JVM bytecode with Endive's runtime compiler, never
 falling back to its interpreter. A node compiles a received module once and

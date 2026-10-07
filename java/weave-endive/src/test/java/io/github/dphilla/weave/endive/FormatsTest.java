@@ -113,20 +113,4 @@ class FormatsTest {
         byte[] unknown = new Bytes.Writer().u8(99).u32(0).toByteArray();
         assertThrows(FormatException.class, () -> Wire.read(new ByteArrayInputStream(unknown)));
     }
-
-    @Test
-    void controlJsonIsStrict() {
-        assertEquals("1", ((Json.Num) Json.parseObject(Golden.utf8("{\"v\":1}")).get("v")).token);
-        for (String bad :
-                List.of(
-                        "{\"a\":1,\"a\":2}",
-                        "{\"a\":1.0}",
-                        "{\"a\":1e0}",
-                        "{\"a\":{}}",
-                        "{\"a\":\"\\ud800\"}",
-                        "{\"a\":1} x",
-                        "{\"a\":01}")) {
-            assertThrows(FormatException.class, () -> Json.parseObject(Golden.utf8(bad)), bad);
-        }
-    }
 }

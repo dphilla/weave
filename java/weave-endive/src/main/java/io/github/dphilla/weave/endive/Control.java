@@ -1,10 +1,26 @@
 package io.github.dphilla.weave.endive;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.exc.MismatchedInputException;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.security.SecureRandom;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /** Structured control schema v1, as weave-core's ControlState; callers hold the node lock. */
@@ -17,51 +33,166 @@ final class Control {
         TRAPPED
     }
 
-    private static final List<String> FIELDS =
-            List.of("schema_version", "action", "node_epoch", "operation_id", "target");
-    // Only what this node verifiably supports: Endive's compiler has no SIMD.
-    private static final String CAPABILITIES =
-            "{\"runtime\":\"endive\",\"adapter_version\":\"0.1.0\",\"migration_protocol\":2,"
-                + "\"services\":[\"env.emit\",\"env.emit32\",\"env.emit64\"],\"imports\":["
-                + "{\"module\":\"env\",\"name\":\"emit\",\"params\":[\"i32\",\"i64\"],\"results\":[]},"
-                + "{\"module\":\"env\",\"name\":\"emit32\",\"params\":[\"i32\"],\"results\":[]},"
-                + "{\"module\":\"env\",\"name\":\"emit64\",\"params\":[\"i64\"],\"results\":[]}],"
-                + "\"features\":[\"multi_memory\",\"reference_types\",\"bulk_memory\",\"multi_value\","
-                + "\"sign_extension\",\"saturating_float_to_int\"],\"limits\":{"
-                + "\"control_frame_bytes\":65536,\"retained_operations\":256,\"operation_id_bytes\":128,"
-                + "\"memory_bytes\":"
-                    + WovenModule.MAX_MEMORY_BYTES
-                    + ",\"module_bytes\":"
-                    + TargetSession.MAX_MODULE_BYTES
-                    + "}}";
+    enum Action {
+        STATUS,
+        MIGRATE,
+        OPERATION;
 
-    private static final class Operation {
-        final String id;
-        final String target;
-        String state = "accepted";
-        String code = "ACCEPTED";
-        String ownership = "retained";
-        String retry = "same_operation";
-        String message = "migration accepted; query this operation ID for its outcome";
-
-        Operation(String id, String target) {
-            this.id = id;
-            this.target = target;
-        }
-
-        String json() {
-            return String.format(
-                    "{\"operation_id\":%s,\"target\":%s,\"state\":%s,\"code\":%s,\"ownership\":%s,"
-                            + "\"retry\":%s,\"message\":%s}",
-                    Json.quote(id),
-                    Json.quote(target),
-                    Json.quote(state),
-                    Json.quote(code),
-                    Json.quote(ownership),
-                    Json.quote(retry),
-                    Json.quote(message));
+        // Exact names only: Jackson's own enum lookup trims whitespace and accepts ordinals.
+        @JsonCreator(mode = JsonCreator.Mode.DELEGATING)
+        static Action of(String name) {
+            for (Action action : values()) {
+                if (action.name().toLowerCase(Locale.ROOT).equals(name)) {
+                    return action;
+                }
+            }
+            throw new IllegalArgumentException("invalid action");
         }
     }
+
+    /** weave-core's control::Request; an absent optional field and null are the same. */
+    static final class Request {
+        @JsonDeserialize(using = U32.class)
+        public Long schemaVersion;
+
+        public Action action;
+        public String nodeEpoch;
+        public String operationId;
+        public String target;
+    }
+
+    /** weave-core's control::Operation, one ledger entry. */
+    static final class Operation {
+        public final String operationId;
+        public final String target;
+        public String state = "accepted";
+        public String code = "ACCEPTED";
+        public String ownership = "retained";
+        public String retry = "same_operation";
+        public String message = "migration accepted; query this operation ID for its outcome";
+
+        Operation(String operationId, String target) {
+            this.operationId = operationId;
+            this.target = target;
+        }
+    }
+
+    /** weave-core's control::Response. */
+    static final class Response {
+        public final int schemaVersion = 1;
+        public final boolean ok;
+        public final String code;
+        public final String message;
+        public final String nodeEpoch;
+        public final String lifecycle;
+        public final String ownership;
+        public final String retry;
+        public final Operation operation;
+        public final Capabilities capabilities;
+
+        Response(
+                Control control,
+                boolean ok,
+                String code,
+                String message,
+                String retry,
+                Operation operation,
+                Capabilities capabilities) {
+            this.ok = ok;
+            this.code = code;
+            this.message = Wire.bounded(message);
+            this.nodeEpoch = control.epoch;
+            this.lifecycle = control.lifecycle;
+            this.ownership = control.ownership;
+            this.retry = retry;
+            this.operation = operation;
+            this.capabilities = capabilities;
+        }
+    }
+
+    /** Only what this node verifiably supports: Endive's compiler has no SIMD. */
+    static final class Capabilities {
+        public final String runtime = "endive";
+        public final String adapterVersion = "0.1.0";
+        public final int migrationProtocol = 2;
+        public final List<String> services = List.of("env.emit", "env.emit32", "env.emit64");
+        public final List<Import> imports =
+                List.of(
+                        new Import("emit", "i32", "i64"),
+                        new Import("emit32", "i32"),
+                        new Import("emit64", "i64"));
+        public final List<String> features =
+                List.of(
+                        "multi_memory",
+                        "reference_types",
+                        "bulk_memory",
+                        "multi_value",
+                        "sign_extension",
+                        "saturating_float_to_int");
+        public final Limits limits = new Limits();
+    }
+
+    static final class Import {
+        public final String module = "env";
+        public final String name;
+        public final List<String> params;
+        public final List<String> results = List.of();
+
+        Import(String name, String... params) {
+            this.name = name;
+            this.params = List.of(params);
+        }
+    }
+
+    static final class Limits {
+        public final int controlFrameBytes = Wire.MAX_CONTROL;
+        public final int retainedOperations = MAX_OPERATIONS;
+        public final int operationIdBytes = 128;
+        public final long memoryBytes = WovenModule.MAX_MEMORY_BYTES;
+        public final long moduleBytes = TargetSession.MAX_MODULE_BYTES;
+    }
+
+    // serde's u32: a plain integer token, so -0, 1.0, "1" and 2^32 are invalid.
+    static final class U32 extends JsonDeserializer<Long> {
+        @Override
+        public Long deserialize(JsonParser p, DeserializationContext ctx) throws IOException {
+            if (p.hasToken(JsonToken.VALUE_NUMBER_INT)
+                    && p.getText().matches("0|[1-9][0-9]{0,9}")
+                    && p.getLongValue() <= 0xffff_ffffL) {
+                return p.getLongValue();
+            }
+            throw MismatchedInputException.from(p, Long.class, "expected a u32");
+        }
+    }
+
+    // serde's String: never a coerced scalar, and never an unpaired surrogate.
+    static final class Text extends JsonDeserializer<String> {
+        @Override
+        public String deserialize(JsonParser p, DeserializationContext ctx) throws IOException {
+            if (p.hasToken(JsonToken.VALUE_STRING)
+                    && p.getText()
+                            .codePoints()
+                            .noneMatch(
+                                    c ->
+                                            c >= Character.MIN_SURROGATE
+                                                    && c <= Character.MAX_SURROGATE)) {
+                return p.getText();
+            }
+            throw MismatchedInputException.from(p, String.class, "expected a well-formed string");
+        }
+    }
+
+    // As strict as serde: duplicate or unknown fields and trailing tokens are errors.
+    private static final ObjectMapper JSON =
+            JsonMapper.builder()
+                    .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+                    .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+                    .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+                    .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .addModule(new SimpleModule().addDeserializer(String.class, new Text()))
+                    .build();
+    private static final Capabilities CAPABILITIES = new Capabilities();
+    private static final int MAX_OPERATIONS = 256;
 
     final String epoch;
     private final Map<String, Operation> operations = new HashMap<>();
@@ -86,42 +217,33 @@ final class Control {
 
     byte[] handle(byte[] payload, boolean canMigrate) {
         accepted = null;
-        Map<String, Object> req;
+        Request req;
         try {
-            req = Json.parseObject(payload);
+            req = JSON.readValue(Bytes.utf8(payload, 0, payload.length), Request.class);
         } catch (FormatException e) {
             return error("INVALID_REQUEST", e.getMessage(), "never");
+        } catch (JsonProcessingException e) {
+            return error("INVALID_REQUEST", e.getOriginalMessage(), "never");
         }
-        Object version = req.get("schema_version");
-        Object action = req.get("action");
-        boolean typed =
-                FIELDS.containsAll(req.keySet())
-                        && version instanceof Json.Num
-                        && action instanceof String
-                        && List.of("status", "migrate", "operation").contains(action)
-                        && optionalStrings(req);
-        if (!typed || !isU32(((Json.Num) version).token)) {
-            return error(
-                    "INVALID_REQUEST", "unknown field, invalid type or invalid action", "never");
+        if (req == null || req.schemaVersion == null || req.action == null) {
+            return error("INVALID_REQUEST", "schema_version and action are required", "never");
         }
-        if (!((Json.Num) version).token.equals("1")) {
+        if (req.schemaVersion != 1) {
             return error("UNSUPPORTED_SCHEMA", "unsupported control schema version", "never");
         }
-        String nodeEpoch = (String) req.get("node_epoch");
-        String id = (String) req.get("operation_id");
-        String target = (String) req.get("target");
-        if (action.equals("status")) {
-            return nodeEpoch == null && id == null && target == null
+        if (req.action == Action.STATUS) {
+            return req.nodeEpoch == null && req.operationId == null && req.target == null
                     ? status()
                     : error("INVALID_REQUEST", "status does not accept operation fields", "never");
         }
-        if (!epoch.equals(nodeEpoch)) {
+        if (!epoch.equals(req.nodeEpoch)) {
             return error(
                     "NODE_EPOCH_MISMATCH",
                     "node epoch is missing or changed; inspect ownership before submitting a new"
                             + " operation",
                     "inspect_ownership");
         }
+        String id = req.operationId;
         if (id == null || !id.matches("[A-Za-z0-9._-]{1,128}")) {
             return error(
                     "INVALID_REQUEST",
@@ -129,8 +251,8 @@ final class Control {
                     "never");
         }
         Operation op = operations.get(id);
-        if (action.equals("operation")) {
-            if (target != null) {
+        if (req.action == Action.OPERATION) {
+            if (req.target != null) {
                 return error("INVALID_REQUEST", "operation lookup does not accept target", "never");
             }
             return op != null
@@ -140,6 +262,7 @@ final class Control {
                             "operation was not accepted in this node epoch",
                             "same_operation");
         }
+        String target = req.target;
         if (target == null || !validTarget(target)) {
             return error(
                     "INVALID_REQUEST",
@@ -154,7 +277,7 @@ final class Control {
                             "operation_id was already accepted with a different target",
                             "never");
         }
-        if (operations.size() >= 256) {
+        if (operations.size() >= MAX_OPERATIONS) {
             return error(
                     "OPERATION_CAPACITY",
                     "node operation ledger is full; accepted IDs are never evicted",
@@ -243,35 +366,17 @@ final class Control {
     }
 
     private byte[] response(
-            boolean ok, String code, String message, String retry, Operation op, String caps) {
-        return Bytes.utf8(
-                String.format(
-                        "{\"schema_version\":1,\"ok\":%s,\"code\":%s,\"message\":%s,\"node_epoch\":%s,"
-                            + "\"lifecycle\":%s,\"ownership\":%s,\"retry\":%s,\"operation\":%s,"
-                            + "\"capabilities\":%s}",
-                        ok,
-                        Json.quote(code),
-                        Json.quote(Wire.bounded(message)),
-                        Json.quote(epoch),
-                        Json.quote(lifecycle),
-                        Json.quote(ownership),
-                        Json.quote(retry),
-                        op == null ? "null" : op.json(),
-                        caps == null ? "null" : caps));
-    }
-
-    private static boolean optionalStrings(Map<String, Object> req) {
-        for (String field : List.of("node_epoch", "operation_id", "target")) {
-            Object v = req.get(field);
-            if (v != null && !(v instanceof String)) {
-                return false;
-            }
+            boolean ok,
+            String code,
+            String message,
+            String retry,
+            Operation op,
+            Capabilities caps) {
+        try {
+            return JSON.writeValueAsBytes(new Response(this, ok, code, message, retry, op, caps));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
         }
-        return true;
-    }
-
-    private static boolean isU32(String token) {
-        return token.matches("[0-9]{1,10}") && Long.parseLong(token) <= 0xffff_ffffL;
     }
 
     // Same rules as weave-core's valid_target; a bracketed literal never reaches DNS.

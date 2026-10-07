@@ -4,22 +4,23 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 /** Live migration through real sockets, against another Endive node or a scripted target. */
 class NodeTest {
     private static final int N = 40_000_000;
+    private static final String STATUS = "{\"schema_version\":1,\"action\":\"status\"}";
     private static WovenModule counter;
     private static List<String> golden;
 
@@ -119,35 +120,33 @@ class NodeTest {
         Running target = new Running(null);
         Running source = new Running(counter);
         source.awaitEvents(2);
-        Matcher epoch =
-                Pattern.compile("\"node_epoch\":\"([0-9a-f]{32})\"")
-                        .matcher(
-                                control(
-                                        source.node,
-                                        "{\"schema_version\":1,\"action\":\"status\"}"));
-        assertTrue(epoch.find());
+        String epoch = control(source.node, STATUS).get("node_epoch").asText();
         String migrate =
                 String.format(
                         "{\"schema_version\":1,\"action\":\"migrate\",\"node_epoch\":\"%s\","
                                 + "\"operation_id\":\"op-1\",\"target\":\"%s\"}",
-                        epoch.group(1), target.address());
-        String accepted = control(source.node, migrate);
-        assertTrue(accepted.contains("\"ok\":true,\"code\":\"ACCEPTED\""), accepted);
-        assertTrue(control(source.node, migrate).contains("\"operation_id\":\"op-1\""));
-        String conflict = control(source.node, migrate.replace(target.address(), "127.0.0.1:1"));
-        assertTrue(conflict.contains("OPERATION_CONFLICT"), conflict);
-        String stale = control(source.node, migrate.replace(epoch.group(1), "0".repeat(32)));
-        assertTrue(stale.contains("NODE_EPOCH_MISMATCH"), stale);
+                        epoch, target.address());
+        JsonNode accepted = control(source.node, migrate);
+        assertTrue(accepted.get("ok").asBoolean(), accepted.toString());
+        assertEquals("ACCEPTED", accepted.get("code").asText());
+        assertEquals("op-1", control(source.node, migrate).at("/operation/operation_id").asText());
+        assertEquals(
+                "OPERATION_CONFLICT",
+                code(source.node, migrate.replace(target.address(), "127.0.0.1:1")));
+        assertEquals(
+                "NODE_EPOCH_MISMATCH", code(source.node, migrate.replace(epoch, "0".repeat(32))));
         source.join();
-        String lookup =
+        JsonNode lookup =
                 control(
                         source.node,
                         String.format(
                                 "{\"schema_version\":1,\"action\":\"operation\",\"node_epoch\":\"%s\","
                                     + "\"operation_id\":\"op-1\"}",
-                                epoch.group(1)));
-        assertTrue(lookup.contains("\"state\":\"succeeded\",\"code\":\"MIGRATED\""), lookup);
-        assertTrue(lookup.contains("\"lifecycle\":\"retired\",\"ownership\":\"retired\""), lookup);
+                                epoch));
+        assertEquals("succeeded", lookup.at("/operation/state").asText(), lookup.toString());
+        assertEquals("MIGRATED", lookup.at("/operation/code").asText());
+        assertEquals("retired", lookup.get("lifecycle").asText());
+        assertEquals("retired", lookup.get("ownership").asText());
         target.join();
         List<String> combined = new ArrayList<>(source.sink.events());
         combined.addAll(target.sink.events());
@@ -285,44 +284,80 @@ class NodeTest {
     @Test
     void structuredStatusSpeaksControlSchemaV1() {
         Node node = new Node(new Golden.Sink().out, System.err, SourceMigration.Options.DEFAULTS);
-        String ok = control(node, "{\"schema_version\":1,\"action\":\"status\"}");
-        assertTrue(ok.matches(".*\"node_epoch\":\"[0-9a-f]{32}\".*"), ok);
-        assertTrue(ok.contains("\"ok\":true,\"code\":\"STATUS_OK\""), ok);
-        assertTrue(ok.contains("\"lifecycle\":\"idle\",\"ownership\":\"none\""), ok);
-        assertTrue(ok.contains("\"capabilities\":{\"runtime\":\"endive\""), ok);
-        assertFalse(ok.contains("simd"), ok);
-        assertTrue(
-                control(node, "{\"schema_version\":2,\"action\":\"status\"}")
-                        .contains("UNSUPPORTED_SCHEMA"));
-        assertTrue(
-                control(node, "{\"schema_version\":1,\"action\":\"status\",\"x\":1}")
-                        .contains("INVALID_REQUEST"));
-        assertTrue(
-                control(node, "{\"schema_version\":1.0,\"action\":\"status\"}")
-                        .contains("INVALID_REQUEST"));
-        assertTrue(
-                control(node, "{\"schema_version\":1,\"action\":\"status\",\"target\":\"a:1\"}")
-                        .contains("INVALID_REQUEST"));
-        assertTrue(
-                control(node, "{\"schema_version\":1,\"action\":\"status\",\"target\":null}")
-                        .contains("STATUS_OK"));
-        assertTrue(control(node, "{\"schema_version\":1}").contains("INVALID_REQUEST"));
-        assertTrue(
-                control(node, "{\"schema_version\":1,\"action\":null}")
-                        .contains("INVALID_REQUEST"));
+        JsonNode ok = control(node, STATUS);
+        assertTrue(ok.get("ok").asBoolean(), ok.toString());
+        assertEquals("STATUS_OK", ok.get("code").asText());
+        assertTrue(ok.get("node_epoch").asText().matches("[0-9a-f]{32}"), ok.toString());
+        assertEquals("idle", ok.get("lifecycle").asText());
+        assertEquals("none", ok.get("ownership").asText());
+        assertTrue(ok.get("operation").isNull());
+        assertEquals("endive", ok.at("/capabilities/runtime").asText());
+        assertEquals(1 << 30, ok.at("/capabilities/limits/memory_bytes").asLong());
+        assertFalse(ok.toString().contains("simd"), ok.toString());
+        assertEquals(
+                "UNSUPPORTED_SCHEMA", code(node, "{\"schema_version\":2,\"action\":\"status\"}"));
+        assertEquals(
+                "STATUS_OK",
+                code(node, "{\"schema_version\":1,\"action\":\"status\",\"target\":null}"));
+    }
+
+    @Test
+    void controlRequestsAreAsStrictAsWeaveCore() {
+        Node node = new Node(new Golden.Sink().out, System.err, SourceMigration.Options.DEFAULTS);
+        String epoch = control(node, STATUS).get("node_epoch").asText();
+        // Each would be accepted, or answered differently, by a lenient parser.
+        for (String bad :
+                List.of(
+                        "{\"schema_version\":1,\"action\":\"status\",\"x\":1}",
+                        "{\"schema_version\":1,\"schema_version\":1,\"action\":\"status\"}",
+                        "{\"schema_version\":1,\"action\":\"status\"} x",
+                        "{\"schema_version\":1.0,\"action\":\"status\"}",
+                        "{\"schema_version\":-0,\"action\":\"status\"}",
+                        "{\"schema_version\":\"1\",\"action\":\"status\"}",
+                        "{\"schema_version\":4294967297,\"action\":\"status\"}",
+                        "{\"schema_version\":1,\"action\":\" status\"}",
+                        "{\"schema_version\":1,\"action\":0}",
+                        "{\"schema_version\":1,\"action\":null}",
+                        "{\"schema_version\":1}",
+                        "{\"schema_version\":1,\"action\":\"status\",\"target\":\"a:1\"}",
+                        "{\"schema_version\":1,\"action\":\"operation\",\"node_epoch\":\"E\","
+                                + "\"operation_id\":12345}",
+                        "{\"schema_version\":1,\"action\":\"migrate\",\"node_epoch\":\"E\","
+                                + "\"operation_id\":\"x\",\"target\":\"\\ud800h:1\"}",
+                        "null",
+                        "[]")) {
+            assertEquals(
+                    "INVALID_REQUEST", code(node, bad.replace("\"E\"", '"' + epoch + '"')), bad);
+        }
+        assertEquals("INVALID_REQUEST", code(node, new byte[] {(byte) 0xff}));
     }
 
     private static void awaitIdle(Node node) throws InterruptedException {
         long deadline = System.nanoTime() + 10_000_000_000L;
-        while (!control(node, "{\"schema_version\":1,\"action\":\"status\"}")
-                .contains("\"lifecycle\":\"idle\"")) {
+        while (!control(node, STATUS).get("lifecycle").asText().equals("idle")) {
             assertTrue(System.nanoTime() < deadline, "the node did not return to idle");
             Thread.sleep(10);
         }
     }
 
-    private static String control(Node node, String json) {
-        return new String(node.control(Golden.utf8(json)), StandardCharsets.UTF_8);
+    private static JsonNode control(Node node, String json) {
+        return control(node, Golden.utf8(json));
+    }
+
+    private static JsonNode control(Node node, byte[] payload) {
+        try {
+            return new ObjectMapper().readTree(node.control(payload));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static String code(Node node, String json) {
+        return control(node, json).get("code").asText();
+    }
+
+    private static String code(Node node, byte[] payload) {
+        return control(node, payload).get("code").asText();
     }
 
     /** A scripted protocol-v2 target that fails at a chosen point. */

@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.dphilla.weave</groupId>
+  <artifactId>weave-endive</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+  <name>Weave Endive adapter</name>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>11</maven.compiler.release>
+    <endive.version>1.1.0</endive.version>
+    <junit.version>5.14.4</junit.version>
+    <spike.package>io/github/dphilla/weave/endive/spike</spike.package>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>runtime</artifactId>
+      <version>${endive.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>run.endive</groupId>
+      <artifactId>wasm</artifactId>
+      <version>${endive.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <!-- the exact woven bytes the build-time compiler consumed, for hashing and MODULE_DATA -->
+      <resource>
+        <directory>src/test/resources/golden</directory>
+        <targetPath>${spike.package}</targetPath>
+        <includes>
+          <include>counter.woven.wasm</include>
+        </includes>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.16.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.6</version>
+        <configuration>
+          <argLine>-Xss8m</argLine>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>run.endive</groupId>
+        <artifactId>endive-compiler-maven-plugin</artifactId>
+        <version>${endive.version}</version>
+        <configuration>
+          <interpreterFallback>FAIL</interpreterFallback>
+        </configuration>
+        <executions>
+          <execution>
+            <id>counter</id>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+            <configuration>
+              <wasmFile>${project.basedir}/src/test/resources/golden/counter.woven.wasm</wasmFile>
+              <name>io.github.dphilla.weave.endive.spike.CounterModule</name>
+              <moduleInterface>io.github.dphilla.weave.endive.spike.Counter</moduleInterface>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -162,6 +162,7 @@ jobs:
           rust: "true"
           node: "true"
           go: "true"
+          java: "true"
       - run: .github/ci/host-service-baseline.sh
 
   go-race:

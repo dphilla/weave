@@ -76,7 +76,8 @@ The integration is language-independent in two separate senses:
 - The control boundary is bounded, versioned JSON records over stdin/stdout;
   any process supervisor can implement it.
 - The data boundary is an ordinary TCP byte stream; all existing Wasmtime,
-  Node, wazero, and WAMR adapters already implement it without linking Pion.
+  Node, wazero, WAMR, and Endive adapters already implement it without linking
+  Pion.
 
 This increment directly qualifies Wasmtime. Compatibility with the other
 native adapters follows from their shared TCP protocol but is not yet a claim

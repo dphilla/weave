@@ -15,16 +15,18 @@ source "$ROOT/.github/ci/awake-guard.sh"
 
 usage() {
   cat <<'EOF'
-usage: .github/ci/conformance.sh [--suite pr|native|wamr|all]
+usage: .github/ci/conformance.sh [--suite pr|native|wamr|endive|all]
                                   [--edge SRC:DST]... [--route A:B:C]...
 
-Runtime names: wasmtime, node, wazero, wamr
+Runtime names: wasmtime, node, wazero, wamr, endive
 
 Suites:
-  pr      representative directed cycle through Wasmtime, Node, and wazero
+  pr      representative directed cycle through Wasmtime, Node, wazero, and Endive
   native  all nine directed pairs among Wasmtime, Node, and wazero
   wamr    WAMR self-migration and both directions with every native adapter
-  all     native + wamr
+  endive  Endive self-migration, both directions with every other adapter,
+          and a Wasmtime -> Endive -> Node route
+  all     native + wamr + endive
 
 Options:
   --list             print the selected edges/routes without running them
@@ -45,7 +47,7 @@ Options:
     WEAVE_CI_STATUS_TIMEOUT_SECONDS timeout for one status request (default: 5)
   WEAVE_CI_KEEP_TEMP           retain a default temporary artifact directory
   WEAVE_CI_PREVENT_SLEEP=0     disable the automatic macOS awake guard
-  WEAVE_BIN, WEAVE_WAZERO_BIN, WEAVE_WAMR_BIN, NODE_BIN
+  WEAVE_BIN, WEAVE_WAZERO_BIN, WEAVE_WAMR_BIN, WEAVE_ENDIVE_BIN, NODE_BIN
 EOF
 }
 
@@ -82,7 +84,8 @@ readonly -a PR_EDGES=(
   'wasmtime:wasmtime'
   'wasmtime:node'
   'node:wazero'
-  'wazero:wasmtime'
+  'wazero:endive'
+  'endive:wasmtime'
 )
 readonly -a NATIVE_EDGES=(
   'wasmtime:wasmtime' 'wasmtime:node' 'wasmtime:wazero'
@@ -95,7 +98,15 @@ readonly -a WAMR_EDGES=(
   'node:wamr'     'wamr:node'
   'wazero:wamr'   'wamr:wazero'
 )
+readonly -a ENDIVE_EDGES=(
+  'endive:endive'
+  'wasmtime:endive' 'endive:wasmtime'
+  'node:endive'     'endive:node'
+  'wazero:endive'   'endive:wazero'
+  'wamr:endive'     'endive:wamr'
+)
 readonly -a NATIVE_ROUTES=('wasmtime:node:wazero')
+readonly -a ENDIVE_ROUTES=('wasmtime:endive:node')
 readonly -a PR_ROUTES=(
   'wasmtime:node:wasmtime'
   "${NATIVE_ROUTES[@]}"
@@ -119,13 +130,19 @@ else
     pr) edges=("${PR_EDGES[@]}"); edge_count=${#PR_EDGES[@]}; routes=("${PR_ROUTES[@]}"); route_count=${#PR_ROUTES[@]} ;;
     native) edges=("${NATIVE_EDGES[@]}"); edge_count=${#NATIVE_EDGES[@]}; routes=("${NATIVE_ROUTES[@]}"); route_count=${#NATIVE_ROUTES[@]} ;;
     wamr) edges=("${WAMR_EDGES[@]}"); edge_count=${#WAMR_EDGES[@]} ;;
-    all) edges=("${NATIVE_EDGES[@]}" "${WAMR_EDGES[@]}"); edge_count=$(( ${#NATIVE_EDGES[@]} + ${#WAMR_EDGES[@]} )); routes=("${NATIVE_ROUTES[@]}"); route_count=${#NATIVE_ROUTES[@]} ;;
+    endive) edges=("${ENDIVE_EDGES[@]}"); edge_count=${#ENDIVE_EDGES[@]}; routes=("${ENDIVE_ROUTES[@]}"); route_count=${#ENDIVE_ROUTES[@]} ;;
+    all)
+      edges=("${NATIVE_EDGES[@]}" "${WAMR_EDGES[@]}" "${ENDIVE_EDGES[@]}")
+      edge_count=$(( ${#NATIVE_EDGES[@]} + ${#WAMR_EDGES[@]} + ${#ENDIVE_EDGES[@]} ))
+      routes=("${NATIVE_ROUTES[@]}" "${ENDIVE_ROUTES[@]}")
+      route_count=$(( ${#NATIVE_ROUTES[@]} + ${#ENDIVE_ROUTES[@]} ))
+      ;;
     *) printf 'unknown suite: %s\n' "$suite" >&2; usage >&2; exit 2 ;;
   esac
 fi
 
 valid_runtime() {
-  case "$1" in wasmtime|node|wazero|wamr) return 0 ;; *) return 1 ;; esac
+  case "$1" in wasmtime|node|wazero|wamr|endive) return 0 ;; *) return 1 ;; esac
 }
 
 mark_runtime_needed() {
@@ -133,12 +150,14 @@ mark_runtime_needed() {
     node) needs_node=1 ;;
     wazero) needs_wazero=1 ;;
     wamr) needs_wamr=1 ;;
+    endive) needs_endive=1 ;;
   esac
 }
 
 needs_node=0
 needs_wazero=0
 needs_wamr=0
+needs_endive=0
 for ((edge_index = 0; edge_index < edge_count; edge_index++)); do
   edge="${edges[$edge_index]}"
   if [[ "$edge" != *:* ]]; then
@@ -203,6 +222,7 @@ readonly NODE_BIN="${NODE_BIN:-node}"
 readonly NODE_RUNNER="$ROOT/js/weave-node.mjs"
 readonly WAZERO_BIN="${WEAVE_WAZERO_BIN:-$ARTIFACT_DIR/bin/weave-wazero}"
 readonly WAMR_BIN="${WEAVE_WAMR_BIN:-$WAMR_CARGO_TARGET/release/weave-wamr}"
+readonly ENDIVE_BIN="${WEAVE_ENDIVE_BIN:-$ROOT/java/weave-endive/weave-endive}"
 readonly WOVEN="$ARTIFACT_DIR/fixture.woven.wasm"
 readonly GOLDEN="$ARTIFACT_DIR/golden.events"
 readonly TIMEOUT_RUN="$ROOT/.github/ci/with-timeout.sh"
@@ -285,6 +305,7 @@ require_command cargo
 require_command python3
 if ((needs_wazero)); then require_command go; fi
 if ((needs_node)); then require_command "$NODE_BIN"; fi
+if ((needs_endive)); then require_command java; fi
 if ((needs_wamr)) && [[ -z "${WAMR_ROOT:-}" ]]; then
   printf '%s\n' 'WAMR_ROOT is required for the selected conformance edges' >&2
   exit 1
@@ -301,6 +322,10 @@ if ((!skip_build)); then
   if ((needs_wamr)); then
     WAMR_ROOT="$WAMR_ROOT" cargo build --locked --release --manifest-path wamr/Cargo.toml
   fi
+  if ((needs_endive)) && [[ -z "${WEAVE_ENDIVE_BIN:-}" ]]; then
+    require_command mvn
+    mvn -B -q -f java/weave-endive/pom.xml package -DskipTests
+  fi
 fi
 
 [[ -x "$WEAVE_BIN" ]] || { printf 'missing executable: %s\n' "$WEAVE_BIN" >&2; exit 1; }
@@ -309,6 +334,13 @@ if ((needs_wazero)); then
 fi
 if ((needs_wamr)); then
   [[ -x "$WAMR_BIN" ]] || { printf 'missing executable: %s\n' "$WAMR_BIN" >&2; exit 1; }
+fi
+if ((needs_endive)); then
+  [[ -x "$ENDIVE_BIN" ]] || { printf 'missing executable: %s\n' "$ENDIVE_BIN" >&2; exit 1; }
+  [[ -n "${WEAVE_ENDIVE_BIN:-}" || -f java/weave-endive/target/weave-endive.jar ]] || {
+    printf '%s\n' 'missing java/weave-endive/target/weave-endive.jar; build it or set WEAVE_ENDIVE_BIN' >&2
+    exit 1
+  }
 fi
 
 [[ -f "$FIXTURE" ]] || { printf 'fixture does not exist: %s\n' "$FIXTURE" >&2; exit 1; }
@@ -334,6 +366,7 @@ fi
   if ((needs_node)); then printf 'node_bin=%s\n' "$NODE_BIN"; fi
   if ((needs_wazero)); then printf 'wazero_bin=%s\n' "$WAZERO_BIN"; fi
   if ((needs_wamr)); then printf 'wamr_bin=%s\n' "$WAMR_BIN"; fi
+  if ((needs_endive)); then printf 'endive_bin=%s\n' "$ENDIVE_BIN"; fi
   printf 'runner_image_os=%s\n' "${ImageOS:-local}"
   printf 'runner_image_version=%s\n' "${ImageVersion:-local}"
   printf 'awake_guard_mode=%s\n' "${WEAVE_CI_AWAKE_MODE:-unknown}"
@@ -343,6 +376,7 @@ fi
   if ((needs_node)); then "$NODE_BIN" --version; fi
   if ((needs_wazero)); then go version; fi
   if ((needs_wamr)); then git -C "$WAMR_ROOT" rev-parse HEAD; fi
+  if ((needs_endive)); then java -version 2>&1 | head -1; fi
   printf 'edges:\n'
   for ((edge_index = 0; edge_index < edge_count; edge_index++)); do printf '  %s\n' "${edges[$edge_index]}"; done
   printf 'routes:\n'
@@ -362,6 +396,8 @@ start_node() {
     wazero:source) "$WAZERO_BIN" "${common[@]}" "${work[@]}" >"$stdout" 2>"$stderr" & ;;
     wamr:target) "$WAMR_BIN" "${common[@]}" >"$stdout" 2>"$stderr" & ;;
     wamr:source) "$WAMR_BIN" "${common[@]}" "${work[@]}" >"$stdout" 2>"$stderr" & ;;
+    endive:target) "$ENDIVE_BIN" "${common[@]}" >"$stdout" 2>"$stderr" & ;;
+    endive:source) "$ENDIVE_BIN" "${common[@]}" "${work[@]}" >"$stdout" 2>"$stderr" & ;;
     *) printf 'cannot start %s as %s\n' "$runtime" "$role" >&2; return 2 ;;
   esac
   STARTED_PID=$!

@@ -222,10 +222,10 @@ or execute its original start function to discover capabilities.
 
 ## Using the weave CLI
 
-The central Rust `weave` binary controls Wasmtime, Node, wazero, and WAMR TCP
-nodes with the same commands. Their existing adapter-specific legacy clients
-continue to work. This is not a browser UI, hosted control service, agent SDK,
-or authenticated rendezvous integration.
+The central Rust `weave` binary controls Wasmtime, Node, wazero, WAMR, and
+Endive TCP nodes with the same commands. Their existing adapter-specific legacy
+clients continue to work. This is not a browser UI, hosted control service,
+agent SDK, or authenticated rendezvous integration.
 
 ```sh
 weave inspect guests/counter.wat --invoke run --arg 5000000
@@ -330,8 +330,8 @@ durability; this interface deliberately does not claim that guarantee.
 
 ## Reproducing the control checks
 
-Run `.github/ci/control-interface.sh` with the documented Node/Go/Rust/WAMR
-toolchains. It runs adversarial control-client peers and the actual four-runtime
+Run `.github/ci/control-interface.sh` with the documented Node/Go/Rust/WAMR/Java
+toolchains. It runs adversarial control-client peers and the actual five-runtime
 CLI cycle, preserving commands, responses, and node logs in an explicitly
 selected `WEAVE_CI_ARTIFACT_DIR`. Rust CLI binary tests additionally exercise
 side-effect-free inspection, argument failures before file writes, malformed

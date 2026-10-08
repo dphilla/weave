@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Black-box human/agent workflow: central CLI against four persistent runtimes.
+// Black-box human/agent workflow: central CLI against five persistent runtimes.
 // No runtime is skipped. All commands, JSON results, and server logs are retained.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -18,6 +18,7 @@ mkdirSync(artifacts, { recursive: true });
 const weave = process.env.WEAVE_BIN || path.join(root, "target/release/weave");
 const wamr = process.env.WAMR_BIN || process.env.WEAVE_WAMR_BIN || path.join(root, "wamr/target/release/weave-wamr");
 const node = process.env.NODE_BIN || process.execPath;
+const endive = process.env.WEAVE_ENDIVE_BIN || path.join(root, "java/weave-endive/weave-endive");
 let wazero = process.env.WEAVE_WAZERO_BIN;
 const owned = new Set();
 const results = [];
@@ -79,7 +80,7 @@ async function unusedAddress() {
 
 async function start(runtime, fixture, active) {
   const address = await unusedAddress();
-  const executable = { wasmtime: weave, node, wazero, wamr }[runtime];
+  const executable = { wasmtime: weave, node, wazero, wamr, endive }[runtime];
   const args = runtime === "node" ? [path.join(root, "js/weave-node.mjs")] : [];
   args.push("serve", "--listen", address);
   if (active) {
@@ -179,7 +180,7 @@ async function main() {
   assert.equal(transform.code, 0, transform.stderr);
 
   const servers = [];
-  for (const runtime of ["wasmtime", "node", "wazero", "wamr"]) {
+  for (const runtime of ["wasmtime", "node", "wazero", "wamr", "endive"]) {
     servers.push(await start(runtime, fixture, runtime === "wasmtime"));
   }
   const services = ["env.emit", "env.emit32", "env.emit64"];
@@ -257,7 +258,7 @@ try {
   await main();
   await cleanup();
   writeFileSync(path.join(artifacts, "RESULTS.json"), JSON.stringify({ status: "PASS", routes: results, subprocesses_reaped: owned.size === 0 }, null, 2) + "\n");
-  console.log("PASS all four runtime control workflows; all owned subprocesses reaped");
+  console.log("PASS all five runtime control workflows; all owned subprocesses reaped");
 } catch (error) {
   await cleanup();
   writeFileSync(path.join(artifacts, "RESULTS.json"), JSON.stringify({ status: "FAIL", error: error.stack, routes: results, subprocesses_reaped: owned.size === 0 }, null, 2) + "\n");

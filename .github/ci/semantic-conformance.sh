@@ -13,17 +13,20 @@ cd "$ROOT"
 
 usage() {
   cat <<'EOF'
-usage: .github/ci/semantic-conformance.sh [native|wamr|all] [--skip-build]
+usage: .github/ci/semantic-conformance.sh [native|wamr|endive|all] [--skip-build]
 
   native  Three fixed-trace fixtures on Wasmtime, Node, and wazero, followed
           by a Wasmtime -> Node -> wazero -> Wasmtime migration route.
   wamr    The same fixtures on Wasmtime/WAMR, plus scalar and SIMD/multiple-
           memory Wasmtime -> WAMR -> Wasmtime migration routes.
-  all     Both lanes, sharing builds and standalone Wasmtime checks.
+  endive  The same fixtures on Wasmtime/Endive, scalar and multiple-memory
+          Wasmtime -> Endive -> Wasmtime routes, and Endive's compile-time
+          refusal of the SIMD fixture.
+  all     Every lane, sharing builds and standalone Wasmtime checks.
 
 The default lane is native. --skip-build requires existing release binaries.
-Explicit WEAVE_BIN, WEAVE_WAZERO_BIN, and WEAVE_WAMR_BIN overrides are used
-without rebuilding or overwriting them. NODE_BIN selects Node.
+Explicit WEAVE_BIN, WEAVE_WAZERO_BIN, WEAVE_WAMR_BIN, and WEAVE_ENDIVE_BIN
+overrides are used without rebuilding or overwriting them. NODE_BIN selects Node.
 
 Environment:
   WAMR_ROOT                        Required for wamr/all.
@@ -32,6 +35,7 @@ Environment:
   WEAVE_CI_SEMANTIC_ITERATIONS       Main route iterations (default: 80000000;
                                    also honors WEAVE_CI_ITERATIONS).
   WEAVE_CI_SIMD_ITERATIONS           SIMD route iterations (default: 100000000).
+  WEAVE_CI_ENDIVE_ITERATIONS         Endive routes' iterations (default: 400000000).
   WEAVE_CI_TIMEOUT_SECONDS          Per-process timeout (default: 180).
   WEAVE_CI_PREVENT_SLEEP=0           Disable the shared macOS awake guard.
 
@@ -44,7 +48,7 @@ suite_set=0
 skip_build=0
 for argument in "$@"; do
   case "$argument" in
-    native|wamr|all)
+    native|wamr|endive|all)
       ((suite_set == 0)) || { printf '%s\n' 'select only one semantic lane' >&2; exit 2; }
       suite="$argument"
       suite_set=1
@@ -57,10 +61,12 @@ done
 
 needs_native=0
 needs_wamr=0
+needs_endive=0
 case "$suite" in
   native) needs_native=1 ;;
   wamr) needs_wamr=1 ;;
-  all) needs_native=1; needs_wamr=1 ;;
+  endive) needs_endive=1 ;;
+  all) needs_native=1; needs_wamr=1; needs_endive=1 ;;
 esac
 if ((needs_wamr)) && [[ -z "${WAMR_ROOT:-}" ]]; then
   printf '%s\n' 'WAMR_ROOT is required for the selected semantic lane' >&2
@@ -69,7 +75,8 @@ fi
 
 readonly ITERATIONS="${WEAVE_CI_SEMANTIC_ITERATIONS:-${WEAVE_CI_ITERATIONS:-80000000}}"
 readonly SIMD_ITERATIONS="${WEAVE_CI_SIMD_ITERATIONS:-100000000}"
-for count in "$ITERATIONS" "$SIMD_ITERATIONS"; do
+readonly ENDIVE_ITERATIONS="${WEAVE_CI_ENDIVE_ITERATIONS:-400000000}"
+for count in "$ITERATIONS" "$SIMD_ITERATIONS" "$ENDIVE_ITERATIONS"; do
   # The SIMD result adds 198 to a signed i32; keep expected arithmetic exact.
   if [[ ! "$count" =~ ^[1-9][0-9]{0,9}$ ]] || ((count > 2147483449)); then
     printf 'semantic iteration count must be 1..2147483449: %s\n' "$count" >&2
@@ -88,6 +95,7 @@ readonly CLI="${WEAVE_BIN:-$ROOT_CARGO_TARGET/release/weave}"
 readonly NODE="${NODE_BIN:-node}"
 readonly WAZERO="${WEAVE_WAZERO_BIN:-$ARTIFACT_ROOT/bin/weave-wazero}"
 readonly WAMR="${WEAVE_WAMR_BIN:-$WAMR_CARGO_TARGET/release/weave-wamr}"
+readonly ENDIVE="${WEAVE_ENDIVE_BIN:-$ROOT/java/weave-endive/weave-endive}"
 readonly TIMEOUT_RUN="$ROOT/.github/ci/with-timeout.sh"
 readonly TIMEOUT_SECONDS="${WEAVE_CI_TIMEOUT_SECONDS:-180}"
 readonly FIXTURE_ROOT="$ROOT/tests/fixtures/p1"
@@ -100,6 +108,9 @@ if ((!skip_build)); then
   if ((needs_wamr)) && [[ -z "${WEAVE_WAMR_BIN:-}" ]]; then
     cargo build --locked --release --manifest-path wamr/Cargo.toml
   fi
+  if ((needs_endive)) && [[ -z "${WEAVE_ENDIVE_BIN:-}" ]]; then
+    mvn -B -q -f java/weave-endive/pom.xml package -DskipTests
+  fi
 fi
 
 require_executable() {
@@ -111,10 +122,19 @@ if ((needs_native)); then
   require_executable "$WAZERO"
 fi
 if ((needs_wamr)); then require_executable "$WAMR"; fi
+if ((needs_endive)); then
+  command -v java >/dev/null || { printf '%s\n' 'Java is unavailable' >&2; exit 1; }
+  require_executable "$ENDIVE"
+  [[ -n "${WEAVE_ENDIVE_BIN:-}" || -f java/weave-endive/target/weave-endive.jar ]] || {
+    printf '%s\n' 'missing java/weave-endive/target/weave-endive.jar; build it or set WEAVE_ENDIVE_BIN' >&2
+    exit 1
+  }
+fi
 
 {
-  printf 'suite=%s\niterations=%s\nsimd_iterations=%s\n' "$suite" "$ITERATIONS" "$SIMD_ITERATIONS"
-  printf 'weave=%s\nwazero=%s\nwamr=%s\nnode=%s\n' "$CLI" "$WAZERO" "$WAMR" "$NODE"
+  printf 'suite=%s\niterations=%s\nsimd_iterations=%s\nendive_iterations=%s\n' \
+    "$suite" "$ITERATIONS" "$SIMD_ITERATIONS" "$ENDIVE_ITERATIONS"
+  printf 'weave=%s\nwazero=%s\nwamr=%s\nendive=%s\nnode=%s\n' "$CLI" "$WAZERO" "$WAMR" "$ENDIVE" "$NODE"
   printf 'guest_fixture_period=64\nstandalone_argument=1000\n'
 } > "$ARTIFACT_ROOT/manifest.txt"
 
@@ -136,6 +156,7 @@ run_standalone() {
     node) command=("$NODE" "$ROOT/js/weave-node.mjs" run --module "$wasm" --invoke run --arg 1000) ;;
     wazero) command=("$WAZERO" run --module "$wasm" --invoke run --arg 1000) ;;
     wamr) command=("$WAMR" run "$wasm" --invoke run --arg 1000) ;;
+    endive) command=("$ENDIVE" run --module "$wasm" --invoke run --arg 1000) ;;
   esac
   if ! "$TIMEOUT_RUN" "$TIMEOUT_SECONDS" "${command[@]}" > "$output.stdout" 2> "$output.stderr"; then
     printf 'standalone failed: %s/%s\n' "$fixture" "$runtime" >&2
@@ -150,6 +171,7 @@ run_standalone() {
 runtimes=(wasmtime)
 if ((needs_native)); then runtimes+=(node wazero); fi
 if ((needs_wamr)); then runtimes+=(wamr); fi
+if ((needs_endive)); then runtimes+=(endive); fi
 for fixture in memory-start-tailcall fixed-zero-memory explicit-start; do
   wasm="$ARTIFACT_ROOT/standalone/$fixture.woven.wasm"
   "$CLI" transform "$FIXTURE_ROOT/$fixture.wat" -o "$wasm" --period 64
@@ -161,7 +183,7 @@ done
 run_route() {
   local label="$1" fixture="$2" expected="$3" iterations="$4" thresholds="$5" route="$6"
   local artifacts="$ARTIFACT_ROOT/$label"
-  WEAVE_BIN="$CLI" WEAVE_WAZERO_BIN="$WAZERO" WEAVE_WAMR_BIN="$WAMR" NODE_BIN="$NODE" \
+  WEAVE_BIN="$CLI" WEAVE_WAZERO_BIN="$WAZERO" WEAVE_WAMR_BIN="$WAMR" WEAVE_ENDIVE_BIN="$ENDIVE" NODE_BIN="$NODE" \
   WEAVE_CI_ARTIFACT_DIR="$artifacts" WEAVE_CI_FIXTURE="$fixture" \
   WEAVE_CI_ENTRY=run WEAVE_CI_ARG="$iterations" WEAVE_CI_ITERATIONS="$iterations" \
   WEAVE_CI_POLL_PERIOD=64 WEAVE_CI_MIGRATE_AFTER_EVENTS=2 \
@@ -180,21 +202,46 @@ if ((needs_native)); then
   run_route native "$FIXTURE_ROOT/memory-start-tailcall.wat" \
     "$FIXTURE_ROOT/memory-start-tailcall.events" "$ITERATIONS" 2,2,2 wasmtime:node:wazero:wasmtime
 fi
+simd_fixture="$ROOT/wamr/tests/fixtures/simd-multi-memory.wat"
+simd_wasm="$ARTIFACT_ROOT/standalone/simd-multi-memory.woven.wasm"
+if ((needs_wamr || needs_endive)); then
+  "$CLI" transform "$simd_fixture" -o "$simd_wasm" --period 64
+fi
+
 if ((needs_wamr)); then
   run_route wamr "$FIXTURE_ROOT/memory-start-tailcall.wat" \
     "$FIXTURE_ROOT/memory-start-tailcall.events" "$ITERATIONS" 2,2 wasmtime:wamr:wasmtime
 
-  simd_fixture="$ROOT/wamr/tests/fixtures/simd-multi-memory.wat"
-  simd_wasm="$ARTIFACT_ROOT/standalone/simd-multi-memory.woven.wasm"
   simd_expected="$ARTIFACT_ROOT/standalone/simd-multi-memory.expected.events"
   printf 'EMIT32 0\nEMIT32 1000\nWEAVE_DONE [1198]\n' > "$simd_expected"
-  "$CLI" transform "$simd_fixture" -o "$simd_wasm" --period 64
   run_standalone simd-multi-memory wasmtime "$simd_wasm" "$simd_expected"
   run_standalone simd-multi-memory wamr "$simd_wasm" "$simd_expected"
   simd_route_expected="$ARTIFACT_ROOT/simd.expected.events"
   printf 'EMIT32 0\nEMIT32 %s\nWEAVE_DONE [%s]\n' "$SIMD_ITERATIONS" "$((SIMD_ITERATIONS + 198))" \
     > "$simd_route_expected"
   run_route simd "$simd_fixture" "$simd_route_expected" "$SIMD_ITERATIONS" 1,0 wasmtime:wamr:wasmtime
+fi
+
+if ((needs_endive)); then
+  # Endive receives the loop after Wasmtime has run part of it; a longer loop leaves it work.
+  run_route endive "$FIXTURE_ROOT/memory-start-tailcall.wat" \
+    "$FIXTURE_ROOT/memory-start-tailcall.events" "$ENDIVE_ITERATIONS" 2,2 wasmtime:endive:wasmtime
+  multi_memory_expected="$ARTIFACT_ROOT/multi-memory.expected.events"
+  printf 'EMIT32 0\nEMIT32 %s\nWEAVE_DONE [%s]\n' "$ENDIVE_ITERATIONS" "$ENDIVE_ITERATIONS" \
+    > "$multi_memory_expected"
+  run_route endive-multi-memory "$ROOT/wamr/tests/fixtures/multi-memory.wat" \
+    "$multi_memory_expected" "$ENDIVE_ITERATIONS" 1,0 wasmtime:endive:wasmtime
+
+  # Endive's compiler has no v128: the module must be refused before any guest code runs.
+  refusal="$ARTIFACT_ROOT/standalone/simd-multi-memory.endive"
+  if "$TIMEOUT_RUN" "$TIMEOUT_SECONDS" "$ENDIVE" run --module "$simd_wasm" --invoke run --arg 1000 \
+    > "$refusal.stdout" 2> "$refusal.stderr" || grep -q '^EMIT' "$refusal.stdout" \
+    || ! grep -q 'Endive cannot compile this module' "$refusal.stderr"; then
+    printf '%s\n' 'Endive did not refuse the SIMD fixture at compile time; review the documented SIMD gap' >&2
+    cat "$refusal.stdout" "$refusal.stderr" >&2
+    exit 1
+  fi
+  printf 'PASS known gap asserted: Endive refuses SIMD before executing guest code\n'
 fi
 
 printf '\nPASS: %s semantic conformance; artifacts: %s\n' "$suite" "$ARTIFACT_ROOT"

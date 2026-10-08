@@ -21,6 +21,7 @@ stages = [
     ('run-unit', ['rust'], None),
     ('run-unit', ['js'], None),
     ('run-unit', ['go'], None),
+    ('run-unit', ['java'], None),
     ('run-wamr', [], None),
     ('check-workflows', [], None),
     ('control-interface', [], 'control'),
@@ -98,10 +99,10 @@ with tempfile.TemporaryDirectory(prefix='weave-qualification-test.') as temporar
                 assert record['wazero'] == str(artifacts / 'conformance/bin/weave-wazero'), record
         assert artifacts.is_dir(), 'explicit artifacts must remain available'
         if fail_at in (0, len(stages)):
-            assert (artifacts / 'host-service-baseline.log').read_text() == 'fixture stage 18\n'
+            assert (artifacts / 'host-service-baseline.log').read_text() == 'fixture stage 19\n'
         print(f'ok {fail_at + 1} - qualification ' +
-              ('success visits all 18 lanes' if fail_at == 0 else
+              ('success visits all 19 lanes' if fail_at == 0 else
                f'failure in lane {fail_at} propagates exit 37 and stops subsequent work'), flush=True)
 
-print('PASS qualification composition (19 fixture cases; no builds or browsers)')
+print('PASS qualification composition (20 fixture cases; no builds or browsers)')
 PY

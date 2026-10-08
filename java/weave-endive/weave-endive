@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Launches the weave-endive node runner built by `mvn package`.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+jar="$here/target/weave-endive.jar"
+[[ -f "$jar" ]] || {
+  printf 'weave-endive: missing %s; build it with: mvn -f %s/pom.xml package -DskipTests\n' "$jar" "$here" >&2
+  exit 1
+}
+exec java -XX:+ExitOnOutOfMemoryError -jar "$jar" "$@"

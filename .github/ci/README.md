@@ -2,22 +2,24 @@
 
 This directory is the single home for CI-only commands, external dependency
 pins, setup logic, conformance matrices, and artifact conventions. Product
-tests remain beside the Rust, JavaScript, Go, and WAMR code they exercise;
+tests remain beside the Rust, JavaScript, Go, Java, and WAMR code they exercise;
 CI does not add package-manager files, Makefile targets, or setup fragments to
 those source trees.
 
 The YAML files in [`../workflows`](../workflows/) are deliberately thin. They
 install requested toolchains, invoke the commands here, and upload artifacts.
 The same commands are directly runnable from the repository root.
-Hosted jobs set `CARGO_TARGET_DIR` beneath `RUNNER_TEMP`, so CI compilation
+Hosted jobs set `CARGO_TARGET_DIR` beneath `RUNNER_TEMP`, so Cargo compilation
 does not populate checkout-local `target/` trees. Local commands retain normal
-Cargo behavior unless the caller sets that variable too.
+Cargo behavior unless the caller sets that variable too. Maven builds the Endive
+adapter in `java/weave-endive/target`, inside the checkout;
+`cleanup.sh --builds` removes it.
 
 ## Inventory
 
 | Path | Purpose |
 |---|---|
-| `versions.env` | Rust, Node, Go, wasm-tools, actionlint, WAMR source pins |
+| `versions.env` | Rust, Node, Go, Java, Maven, wasm-tools, actionlint, WAMR source pins |
 | `setup/action.yml` | Shared GitHub Actions toolchain setup and download cache |
 | `artifact-lifecycle.sh` | Shared success/failure retention policy for default temporary artifacts |
 | `artifact-lifecycle.test.sh` | Isolated lifecycle cleanup and retention checks |
@@ -25,7 +27,7 @@ Cargo behavior unless the caller sets that variable too.
 | `cleanup.test.sh` | Isolated containment, symlink, dry-run, and scope checks |
 | `awake-guard.sh` | Shared macOS power assertion for long local entry points |
 | `awake-guard.test.sh` | Isolated platform, bypass, argv, and exit-status checks |
-| `run-unit.sh` | Required Rust-quality, root Rust, JavaScript, and Go lanes |
+| `run-unit.sh` | Required Rust-quality, root Rust, JavaScript, Go, and Java lanes |
 | `package-smoke.sh` | Pack, clean-install, and import every reusable JavaScript workspace |
 | `typecheck.sh` | Pack and clean-install authenticated rendezvous, strictly compile browser/Node/custom-provider consumers, and execute the Node consumer |
 | `typecheck/package.json`, `typecheck/package-lock.json` | Exact CI-only TypeScript and Node declaration dependencies; no product dependencies |
@@ -35,13 +37,14 @@ Cargo behavior unless the caller sets that variable too.
 | `wait-for.sh` | Suspend-safe process, output, and event condition waits |
 | `wait-for.test.sh` | Isolated condition success and active-time timeout checks |
 | `conformance.sh` | Real-process, real-TCP golden-trace pair and route driver |
-| `control-interface.sh` | Structured CLI/adversarial-peer checks and persistent four-runtime operation-recovery cycle |
+| `control-interface.sh` | Structured CLI/adversarial-peer checks and persistent five-runtime operation-recovery cycle |
 | `semantic-conformance.sh` | Fixed expected guest traces for initialization, memory, tail calls, and SIMD before/after migration |
 | `checkpoint-file.sh` | Checkpoint-file → fresh-process restore golden check |
 | `rust-guest.sh` | Out-of-tree Rust/LLVM guest build and Wasmtime→Node migration |
 | `native-e2e.sh` | Safe composition used by the legacy `scripts/e2e.sh` shim |
 | `prepare-wamr.sh` | Safe temporary checkout plus immutable WAMR tag verification |
 | `prepare-wasm-tools.sh` | Platform-select and checksum the pinned official corpus tool |
+| `prepare-maven.sh` | Checksum-verify the pinned Apache Maven used by the Java lane |
 | `prepare-testsuite.sh` | Acquire and verify pinned test data, or explicitly refresh upstream |
 | `prepare-testsuite.test.sh` | Offline real-Git acquisition, reuse, and destination-safety regressions |
 | `run-wamr.sh` | Independent WAMR workspace strict Clippy, tests, and release build |
@@ -57,7 +60,7 @@ Cargo behavior unless the caller sets that variable too.
 | `spec-corpus-inputs.py` | Validate extraction manifests and record/check exact corpus input hashes |
 | `spec-corpus.test.sh` | Corpus classification regression checks with deterministic fake tools |
 | `qualification.sh` | Deterministic, non-publishing runtime qualification composition |
-| `qualification.test.sh` | Isolated 18-lane ordering, per-lane failure propagation, artifact routing, and final pipeline regression checks |
+| `qualification.test.sh` | Isolated 19-lane ordering, per-lane failure propagation, artifact routing, and final pipeline regression checks |
 | `check-workflows.sh` | Per-file shell syntax, action SHA pins, CI harness tests, and pinned actionlint validation |
 | `check-workflows.test.sh` | Isolated valid/broken repositories proving syntax and action-pin checks reject regressions |
 
@@ -86,13 +89,14 @@ From the repository root:
 .github/ci/run-unit.sh rust
 .github/ci/run-unit.sh js
 .github/ci/run-unit.sh go
+.github/ci/run-unit.sh java
 
 # Validate CI definitions and run the validator's offline regression fixtures.
 bash .github/ci/check-workflows.sh
 # Run just the fixtures, without downloading actionlint or building runtimes.
 bash .github/ci/check-workflows.test.sh
 
-# Human/agent CLI control against all four native adapters and faulty peers.
+# Human/agent CLI control against all five native adapters and faulty peers.
 WEAVE_CI_ARTIFACT_DIR=/tmp/weave-control-check \
   bash .github/ci/control-interface.sh
 
@@ -172,7 +176,7 @@ scripts/cleanup.sh
 # Also sweep owned, direct TMPDIR children with exact harness prefixes.
 scripts/cleanup.sh --temp
 
-# Also discard the root Cargo and independent WAMR build caches.
+# Also discard the root Cargo, independent WAMR, and Endive Maven build trees.
 scripts/cleanup.sh --builds
 
 # Preview every supported cleanup class.
@@ -184,7 +188,8 @@ The command deliberately never invokes `git clean`, `git restore`, or
 its scope. `--temp` does not use a broad `weave-*` deletion: it accepts only
 explicit harness prefixes, direct children of the physical temporary root,
 owned by the current user, with no symlink components. `--builds` accepts only
-this checkout's `target/` and `wamr/target/` trees.
+this checkout's `target/`, `wamr/target/`, and `java/weave-endive/target/`
+trees.
 
 Central runners that create their own temporary artifact directory remove it
 automatically after success and retain it after failure. Set
@@ -229,6 +234,20 @@ build reuse with real Cargo/CMake and a small native executable. The fixtures
 need no network downloads; the adapter's initial WAMR/SIMDe setup is unchanged.
 Build-local source-mirror tests additionally guard source immutability and
 overlapping-path/symlink safety. No new workflow job or service is required.
+
+The Endive adapter needs a JDK and Maven: JDK 11 or newer builds and tests it,
+its formatter check needs JDK 21 or newer, and CI pins Temurin 21. Its
+conformance suite also pairs Endive with WAMR, so it needs `WAMR_ROOT` as well:
+
+```sh
+.github/ci/run-unit.sh java
+.github/ci/conformance.sh --suite endive
+.github/ci/semantic-conformance.sh endive
+```
+
+Hosted jobs install Maven with `prepare-maven.sh DESTINATION`, which accepts
+only destinations beneath the CI temporary root and verifies the published
+SHA-512 pinned in `versions.env`.
 
 The browser lane additionally requires Node 22 or newer and Chrome/Chromium:
 
@@ -309,10 +328,11 @@ event stream, then compares every selected route's complete `EMIT*` and
 
 | Suite | Cases |
 |---|---|
-| `pr` | Wasmtime→Wasmtime, Wasmtime→Node, Node→wazero, wazero→Wasmtime, Wasmtime→Node→Wasmtime, and the demo's Wasmtime→Node→wazero route |
+| `pr` | Wasmtime→Wasmtime, Wasmtime→Node, Node→wazero, wazero→Endive, Endive→Wasmtime, Wasmtime→Node→Wasmtime, and the demo's Wasmtime→Node→wazero route |
 | `native` | All 9 directed pairs, self-pairs included, among Wasmtime, Node, and wazero, plus Wasmtime→Node→wazero |
 | `wamr` | WAMR→WAMR plus both directions between WAMR and each native adapter: 7 cases |
-| `all` | `native` + `wamr`: all 16 directed pairs among the four native runtimes, plus Wasmtime→Node→wazero |
+| `endive` | Endive→Endive, both directions between Endive and each other runtime (WAMR included), and Wasmtime→Endive→Node: 10 cases |
+| `all` | `native` + `wamr` + `endive`: all 25 directed pairs among the five native runtimes, plus Wasmtime→Node→wazero and Wasmtime→Endive→Node |
 
 Migration is requested after the source log reaches a deterministic minimum
 event count, not after a timing guess. The source continues while the request
@@ -334,12 +354,13 @@ their disposable fixtures, so `WEAVE_CI_KEEP_TEMP=1` does not turn a cleanup
 assertion into a false failure or make a test use a caller's artifact directory.
 `--skip-build`
 requires the
-default release binaries to exist (or `WEAVE_BIN`, `WEAVE_WAZERO_BIN`, and
-`WEAVE_WAMR_BIN` to name them explicitly).
+default release binaries to exist (or `WEAVE_BIN`, `WEAVE_WAZERO_BIN`,
+`WEAVE_WAMR_BIN`, and `WEAVE_ENDIVE_BIN` to name them explicitly). Endive's
+default is the `java/weave-endive/weave-endive` launcher over the Maven build.
 
 ### Fixed guest semantics
 
-`semantic-conformance.sh native|wamr|all` compares each runtime with fixed
+`semantic-conformance.sh native|wamr|endive|all` compares runtimes with fixed
 expected events, independently of the woven Wasmtime golden run. The three
 fixtures in [`tests/fixtures/p1`](../../tests/fixtures/p1/) cover synchronous
 initialization, explicit `_start` invocation, nonfirst-entry result selection,
@@ -354,12 +375,20 @@ WAMR lane checks Wasmtime/WAMR and runs Wasmtime → WAMR → Wasmtime for both 
 combined fixture and `wamr/tests/fixtures/simd-multi-memory.wat`. The SIMD case
 retains vector values across nested calls, indexed memory operations, and
 checkpoints; its independently expected result is the iteration count plus
-198. `all` shares builds and the standalone Wasmtime checks between lanes.
+198. The Endive lane checks Wasmtime/Endive, runs Wasmtime → Endive → Wasmtime
+for the combined fixture and `wamr/tests/fixtures/multi-memory.wat`, and
+asserts that Endive refuses the SIMD fixture at compile time, before executing
+any guest code: Endive's compiler has no `v128` support yet. `all` shares
+builds and the standalone Wasmtime checks between lanes.
 
 Main-fixture routes default to 80 million iterations with two-event migration
 thresholds. The SIMD route defaults to 100 million and per-hop thresholds
-`1,0`. Override `WEAVE_CI_SEMANTIC_ITERATIONS` (or `WEAVE_CI_ITERATIONS`) and
-`WEAVE_CI_SIMD_ITERATIONS` for local investigation; smaller counts may finish
+`1,0`. The Endive routes default to 400 million, with thresholds `2,2` for the
+combined fixture and `1,0` for multiple memories: Endive receives the loop
+after Wasmtime has run part of it, so it needs a longer loop to still be running
+at the second hop. Override `WEAVE_CI_SEMANTIC_ITERATIONS` (or
+`WEAVE_CI_ITERATIONS`), `WEAVE_CI_SIMD_ITERATIONS`, and
+`WEAVE_CI_ENDIVE_ITERATIONS` for local investigation; smaller counts may finish
 before a control request arrives. Both the uninterrupted golden and every
 migrated trace must match the independent expectation. Logs and mismatch
 diffs remain under the selected artifact directory.
@@ -367,8 +396,8 @@ diffs remain under the selected artifact directory.
 Explicit runtime binary overrides are used without rebuilding them.
 `--skip-build` reuses existing binaries, as the hosted workflows do after their
 ordinary conformance steps. The native lane is required in PR/main and the
-legacy native E2E composition; WAMR semantic coverage is required on main.
-Release qualification runs both lanes.
+legacy native E2E composition; WAMR and Endive semantic coverage is required on
+main. Release qualification runs every lane.
 
 ## What is required today
 
@@ -380,7 +409,8 @@ The PR-required lanes are:
 - Fresh single-file Pi packaging and six-tab Chrome migration over both local
   BroadcastChannel and literal-ICE WebRTC transports.
 - Go format, vet, tests, and a non-source-tree build.
-- The six-case representative migration suite, including the advertised
+- Java format check, warning-free build, and tests for the Endive adapter.
+- The seven-case representative migration suite, including the advertised
   three-runtime server demo route.
 - Fixed guest semantic traces across Wasmtime/Node/wazero, including a
   Wasmtime → Node → wazero → Wasmtime migration route.
@@ -395,11 +425,12 @@ WAMR workspace wherever the verified WAMR source is configured. Go race
 instrumentation remains an advisory nightly job until it passes on every
 supported Go/platform combination.
 
-CI currently qualifies the exact current Node and Go pins in `versions.env`.
-The relay's documented Node 18 floor, the wazero adapter's Go 1.22 language
-floor, and the WebRTC sidecar's Go 1.24 language floor are not yet protected by
-minimum-version jobs; add a scheduled compatibility matrix before treating
-those floors as continuously qualified.
+CI currently qualifies the exact current Node, Go, and Java pins in
+`versions.env`. The relay's documented Node 18 floor, the wazero adapter's Go
+1.22 language floor, the WebRTC sidecar's Go 1.24 language floor, and the
+Endive adapter's Java 11 floor are not yet protected by minimum-version jobs;
+add a scheduled compatibility matrix before treating those floors as
+continuously qualified.
 
 Real browser-to-browser WebRTC and browser-to-native WebRTC through the generic
 sidecar are required on main, nightly, and release qualification. The peer
@@ -417,9 +448,10 @@ matrix.
 
 ## Host-service baseline, not a plugin ABI
 
-`host-service-baseline.sh` groups today's Rust, JavaScript, and Go assertions
-for service identity, staging, hash ordering, and commit uncertainty. The
-directed WAMR routes separately exercise its built-in emit-service blobs. This
+`host-service-baseline.sh` groups today's Rust, JavaScript, Go, and Java
+assertions for service identity, staging, hash ordering, and commit
+uncertainty. The directed WAMR routes separately exercise its built-in
+emit-service blobs. This
 is useful regression coverage, but there are not yet language-neutral golden
 vectors, dynamic plugin discovery, version negotiation, activation/abort
 lifecycle hooks, or a general fencing API. A real plugin conformance suite
@@ -499,8 +531,10 @@ acquisition and failure paths without network access.
 - No workflow executes mutable branch code from another repository.
 - GitHub Actions are immutable-SHA pinned. Dependabot proposes workflow-action
   updates, but GitHub does not scan actions inside nested composite actions;
-  the three pins in `setup/action.yml` need a manual monthly audit.
+  the four pins in `setup/action.yml` need a manual monthly audit.
 - WAMR uses a product tag plus an immutable commit verification.
+- The JDK is pinned to an exact Temurin release, and Apache Maven by version
+  and published SHA-512, both in `versions.env`.
 - `wasm-tools` is version- and per-platform-checksum-pinned in `versions.env`;
   `actionlint` is version-pinned there as well.
 - The official WebAssembly testsuite is test data, not executed code. Scheduled

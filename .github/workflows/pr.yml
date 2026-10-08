@@ -87,6 +87,19 @@ jobs:
       - name: Validate centralized CI definitions
         run: .github/ci/check-workflows.sh
 
+  java:
+    name: Java tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/ci/setup
+        with:
+          java: "true"
+      - run: .github/ci/run-unit.sh java
+
   rust-quality:
     name: Rust formatting and Clippy
     runs-on: ubuntu-24.04
@@ -102,7 +115,7 @@ jobs:
 
   conformance:
     name: Representative migration conformance
-    needs: [rust, rust-quality, javascript, go]
+    needs: [rust, rust-quality, javascript, go, java]
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -114,6 +127,7 @@ jobs:
           rust: "true"
           node: "true"
           go: "true"
+          java: "true"
       - name: Run PR migration cycle and chain
         env:
           WEAVE_CI_ARTIFACT_DIR: ${{ runner.temp }}/weave-ci/pr/conformance

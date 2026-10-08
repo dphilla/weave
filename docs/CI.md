@@ -10,7 +10,7 @@ contains only triggers, permissions, job ordering, and artifact upload wiring.
 | Tier | Trigger | Purpose | Workflow |
 |---|---|---|---|
 | Pull request | PRs to `main`, manual dispatch | Language gates, checkpoint-file restore, representative migration routes, and fixed expected native guest semantics | `pr.yml` |
-| Main conformance | Every push to `main`, manual dispatch | Language gates, all 16 directed runtime pairs, native/WAMR semantic and SIMD routes, Rust/LLVM guest, and browser migration demos | `conformance.yml` |
+| Main conformance | Every push to `main`, manual dispatch | Language gates, all 25 directed runtime pairs, native/WAMR/Endive semantic and SIMD routes, Rust/LLVM guest, and browser migration demos | `conformance.yml` |
 | Nightly adversity | Daily, manual dispatch | Protocol failure-path tests, repeated workload-progress thresholds, WAMR multi-memory, both real-browser routes, and host-service baseline | `nightly.yml` |
 | Corpus | Weekly, manual dispatch | Transform and validate valid modules extracted from the official core Wasm testsuite | `weekly-corpus.yml` |
 | Qualification | `v*` tags, manual dispatch | Deterministic non-publishing runtime qualification with long artifact retention | `qualification.yml` |
@@ -18,8 +18,8 @@ contains only triggers, permissions, job ordering, and artifact upload wiring.
 The qualification workflow never publishes a release and has only
 `contents: read` permission. A tag indicates a candidate to test, not proof
 that it passed; release publication should wait for this workflow's result.
-It composes Rust formatting/Clippy, units, workflow validation, structured
-control/preflight and adversarial CLI checks, checkpoint
+It composes Rust formatting/Clippy, units (including Java), workflow
+validation, structured control/preflight and adversarial CLI checks, checkpoint
 restore, the Rust guest, all runtime directions, fixed guest semantics and SIMD state migration,
 WAMR/Chrome, browser/WebRTC, host-service baseline, and adversity.
 It intentionally excludes the floating upstream corpus and the advisory Go
@@ -50,15 +50,19 @@ expected traces for initialization, memory size/growth/bounds, tail calls, and
 entry results. It checks standalone execution and real migration independently
 of the ordinary woven Wasmtime golden run, so a shared transformer bug cannot
 pass merely by producing the same wrong behavior everywhere. PRs run the
-native lane; main adds WAMR and live SIMD/multiple-memory state. Qualification
-runs both. See the [semantic lane documentation](../.github/ci/README.md#fixed-guest-semantics)
+native lane; main adds WAMR with live SIMD/multiple-memory state, and Endive,
+whose lane migrates the combined and multiple-memory fixtures through Endive
+and asserts that it refuses the SIMD fixture before running guest code.
+Qualification runs every lane. See the
+[semantic lane documentation](../.github/ci/README.md#fixed-guest-semantics)
 for commands, fixtures, and replay settings.
 
 [`control-interface.sh`](../.github/ci/control-interface.sh) adds real CLI
 inspection and epoch-scoped operation recovery on a persistent
-Wasmtime→Node→wazero→WAMR→Wasmtime cycle, plus faulty loopback peers that test
-deadlines, reply identity, bounded framing, and lost acknowledgements. It runs
-in qualification and is directly replayable locally. The existing one-shot
+Wasmtime→Node→wazero→WAMR→Endive→Wasmtime cycle, plus faulty loopback peers
+that test deadlines, reply identity, bounded framing, and lost
+acknowledgements. It runs in qualification and is directly replayable locally.
+The existing one-shot
 golden-event routes explicitly use synchronous legacy migration control;
 structured operation history is process-lifetime and cannot survive those
 nodes' intentional `--exit-on-done` shutdown. CLI/parser tests remain in the
@@ -169,9 +173,9 @@ scripts/cleanup.sh --dry-run --all
 
 The default removes known demo output only. `--temp` adds owned direct
 children of `TMPDIR` matching exact Weave harness prefixes; `--builds` adds
-only the root and WAMR build trees. The command never runs a Git cleanup or
-restores tracked files, so implementation edits cannot be mistaken for test
-residue. See the
+only the root, WAMR, and Endive build trees. The command never runs a Git
+cleanup or restores tracked files, so implementation edits cannot be mistaken
+for test residue. See the
 [CI subsystem cleanup documentation](../.github/ci/README.md#local-cleanup) for
 the complete behavior and commands.
 
@@ -179,7 +183,7 @@ the complete behavior and commands.
 
 1. Manually dispatch `Pull request` and confirm all required jobs and uploaded
    artifacts on GitHub-hosted infrastructure.
-2. Make the Rust tests, Rust formatting and Clippy, JavaScript, Go, and
+2. Make the Rust tests, Rust formatting and Clippy, JavaScript, Go, Java, and
    representative conformance jobs branch protection requirements.
 3. Let `Main conformance`, including all real-browser routes, pass at least
    once before treating README runtime claims as CI-qualified.
